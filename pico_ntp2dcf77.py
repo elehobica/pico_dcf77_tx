@@ -132,15 +132,16 @@ def pioAsmDcf77Carrier():
   # generate 1/1200 frequency pulse against PIO clock with amplitude control by PWM
   #  jump pin from jmp_pin to control amplitude by PWM
   #  sideset pin from sideset_base to output modulation pulse
-  # assume X = ISR = 148 at program entry to make 149-times loop
-  # High amplitude: 100% by PWM 4/4
-  # Low amplitude :  25% by PWM 1/4
+  # assume ISR = 148 at program entry to make 149-times loop (corresponding to 1cyc = 1200clk / 4clk / 2turn = 150 loop)
+  # use X for phase modulation by designating initial value of loop counter which determines the cycle
+  # High amplitude: 100% by PWM 0/4 - 4/4
+  # Low amplitude :  25% by PWM 3/8 - 5/8
 
   # inst                       side    delay     # comment
   nop()                       .side(0)           # initialize pin as 0
 
   # ---------------------- no side-set option to keep previous pin status (start)
-  label('Clocks4Or8End')
+  label('ClocksEnd')
   out(y, 22)                                     # get next Clocks4/8
   out(x, 1)                                      # get LowAmp (0: High Amp, 1: Low Amp)
   jmp(x_dec, 'LowAmpH1Setup')
@@ -161,37 +162,41 @@ def pioAsmDcf77Carrier():
   # ---------------------- no side-set option to keep previous pin status (end)
 
   wrap_target()
-  # Start of H1 of High Amplitude (4 * 150 clocks if no phase modulation)
+  # Start of H1 of High Amplitude (4 * 150 clocks if no phase modulation) pulse shape: ~~~~
   label('HighAmpH1')
   jmp(y_dec, 'HighAmpH1_2')   .side(1)
-  jmp('Clocks4Or8End')        .side(1)
+  jmp('ClocksEnd')            .side(1)
   label('HighAmpH1_2')
   jmp(x_dec, 'HighAmpH1')     .side(1).delay(2)
   mov(x, isr)                 .side(1).delay(3)  # load 148
   # End of H1 of High Amplitude
-  # Start of H2 of High Amplitude (4 * 150 clocks if no phase modulation)
+  # Start of H2 of High Amplitude (4 * 150 clocks if no phase modulation) pulse shape: ____
   label('HighAmpH2')
   jmp(y_dec, 'HighAmpH2_2')   .side(0)
-  jmp('Clocks4Or8End')        .side(0)
+  jmp('ClocksEnd')            .side(0)
   label('HighAmpH2_2')
   jmp(x_dec, 'HighAmpH2')     .side(0).delay(2)
   mov(x, isr)                 .side(0).delay(3)  # load 148
   wrap()
   # End of H2 of High Amplitude
 
-  # Start of H1 of Low Amplitude (4 * 150 clocks only for no phase modulation)
+  label('LowAmpH1_6')
+  jmp(x_dec, 'LowAmpH1')      .side(0).delay(2)  # always jmp
+  # Start of H1 of Low Amplitude (8 * 75 clocks only for no phase modulation) pulse shape: ~~~~~___
   label('LowAmpH1')
-  nop()                       .side(1)
-  jmp(x_dec, 'LowAmpH1')      .side(0).delay(2)
-  nop()                       .side(1)
-  mov(x, isr)                 .side(0).delay(2)  # load 148
+  jmp(x_dec, 'LowAmpH1_6')    .side(1).delay(4)
+  mov(x, isr)                 .side(0).delay(1)  # load 148
+  jmp('LowAmpH2')             .side(0)
   # End of H1 of Low Amplitude
-  # Start of H2 of Low Amplitude (4 * 150 clocks only for no phase modulation)
+
+  label('LowAmpH2_5')
+  jmp(x_dec, 'LowAmpH2')      .side(0).delay(3)  # always jmp
+  # Start of H2 of Low Amplitude (8 * 75 clocks only for no phase modulation) pulse shape: _~~~____
   label('LowAmpH2')
   jmp(y_dec, 'LowAmpH2_2')    .side(0)
-  jmp('Clocks4Or8End')        .side(0)
+  jmp('ClocksEnd')            .side(0)           # lacking pulse only last time
   label('LowAmpH2_2')
-  jmp(x_dec, 'LowAmpH2')      .side(0).delay(2)
+  jmp(x_dec, 'LowAmpH2_5')    .side(1).delay(2)
   mov(x, isr)                 .side(0).delay(2)  # load 148
   jmp('LowAmpH1')             .side(0)
   # End of H2 of Low Amplitude
@@ -260,26 +265,42 @@ class Dcf77:
     return vector
   def run(self, secToRun: int = 0) -> None:
     def sendTimecode(sm: rp2.StateMachine, vector: list, second: int = 0) -> None:
-      def genFifoData(clocks4Or8: int, lowAmp: bool, negPhaseMod: bool, phaseOfs: int) -> int:
-        return ((phaseOfs & 0xff) << 24) | ((int(negPhaseMod) & 0b1) << 23) | ((int(lowAmp) & 0b1) << 22) | (clocks4Or8 & 0x3fffff)
+      def genFifoData(clocks: int, lowAmp: bool, negPhaseMod: bool, phaseOfs: int) -> int:
+        # FIFO data description
+        # [31:24] PhaseOfs : set 148 for 0°, 135 for +15.6° and 11 for -15.6°
+        # [23]    PhasePol : 0: >=0, 1: < 0
+        # [22]    LowAmp   : 0: High Amplitude, 1: Low Amplitude
+        # [21:0]  Clocks   : High Amplitude case - Clocks/4 incl. adj.  set 7750*149*2-1 for 7750 cycles
+        #                    Low Amplitude case  - Clocks/16 incl. adj. set 7750*75-1    for 7750 cycles
+        return ((phaseOfs & 0xff) << 24) | ((int(negPhaseMod) & 0b1) << 23) | ((int(lowAmp) & 0b1) << 22) | (clocks & 0x3fffff)
+      # Preset data for FIFO
+      LOW_7750            = genFifoData(7750*75-1,    True,  False, 149-1)  # Low 7750 cyc (100 ms) w/o phase mod
+      LOW_15500           = genFifoData(15500*75-1,   True,  False, 149-1)  # Low 15500 cyc (200 ms) w/o phase mod
+      HIGH_7750           = genFifoData(7750*149*2-1, False, False, 149-1)  # High 7750 cyc (100 ms) w/o phase mod
+      HIGH_120_PLUS_15P6  = genFifoData(120*149*2-1,  False, False, 136-1)  # High 120 cyc w/ +15.6 deg
+      HIGH_120_MINUS_15P6 = genFifoData(120*149*2-1,  False, True,  12-1)   # High 120 cyc w/ -15.6 deg
+      HIGH_560            = genFifoData(560*149*2-1,  False, False, 149-1)  # High 560 cyc w/o phase mod
+      # Send one minite data
       for value in vector[second:]:
         self.lcTime.alignSecondEdge()
         if value == 0:
-          sm.put(genFifoData(7750*149-1, True, False, 149-1))  # Low 7750 cyc (100ms)
-          sm.put(genFifoData(7750*149*2-1, False, False, 149-1))  # High 7750 cyc (100ms)
+          sm.put(LOW_7750)
+          sm.put(HIGH_7750)
           for i in range(256):  # Phase modulation 120cyc * 512
-            sm.put(genFifoData(120*149*2-1, False, False, 136-1))  # +15.6deg 120cyc
-            sm.put(genFifoData(120*149*2-1, False, True, 12-1))  # -15.6deg 120cyc
-          sm.put(genFifoData(540*149*2-1, False, False, 149-1))  # High rest 540cyc
+            # dummy (not implemented yet)
+            sm.put(HIGH_120_PLUS_15P6)
+            sm.put(HIGH_120_MINUS_15P6)
+          sm.put(HIGH_560)
         elif value == 1:
-          sm.put(genFifoData(7750*149*2-1, True, False, 149-1))  # Low 7750 cyc (200ms)
+          sm.put(LOW_15500)
           for i in range(256):  # Phase modulation 120cyc * 512
-            sm.put(genFifoData(120*149*2-1, False, False, 136-1))  # +15.6deg 120cyc
-            sm.put(genFifoData(120*149*2-1, False, True, 12-1))  # -15.6deg 120cyc
-          sm.put(genFifoData(540*149*2-1, False, False, 149-1))  # High rest 540cyc
+            # dummy (not implemented yet)
+            sm.put(HIGH_120_PLUS_15P6)
+            sm.put(HIGH_120_MINUS_15P6)
+          sm.put(HIGH_560)
         else:  # synchronization
           for i in range(10):
-            sm.put(genFifoData(7750*149*2-1, False, False, 149-1))  # High 7750 cyc (100ms)
+            sm.put(HIGH_7750)
     # run
     ticksTimeout = time.ticks_add(time.ticks_ms(), secToRun * 1000)
     # start PIO
