@@ -37,7 +37,7 @@ TZ_CET_OFS = 1
 DCF77_CARRIER_FREQ = 77500
 
 # System Frequency to set multiplier of DCF77 frequency
-SYSTEM_FREQ = DCF77_CARRIER_FREQ * 800 * 2
+SYSTEM_FREQ = DCF77_CARRIER_FREQ * 600 * 2
 
 # Pin Configuration
 PIN_MOD = 2   # modulation (output for PIO) base, take 2 pins
@@ -123,13 +123,13 @@ class LocalTime:
 # PIO program
 @rp2.asm_pio(sideset_init = rp2.PIO.OUT_LOW)
 def pioAsmDcf77Carrier():
-  # generate 1/1600 frequency pulse against PIO clock with amplitude control by PWM
+  # generate 1/1200 frequency pulse against PIO clock with amplitude control by PWM
   #  jump pin from jmp_pin to control amplitude by PWM
   #  sideset pin from sideset_base to output modulation pulse
-  # assume X = ISR = 198 at program entry to make 199-times loop
+  # assume X = ISR = 148 at program entry to make 199-times loop
 
   wrap_target()
-  # Start of Half1 (4 * 200 cycles)
+  # Start of Half1 (4 * 150 clocks)
   # High/Low switch by jmp_pin (0: High Amplitude, 1: Low Amplitude)
   # inst                   side    delay      # comment
   jmp(pin, 'Half1Low2')   .side(1)
@@ -140,7 +140,7 @@ def pioAsmDcf77Carrier():
   nop()                   .side(1).delay(1)
   label('Half1High3')
   jmp(x_dec, 'Half1High1').side(1).delay(1)
-  mov(x, isr)             .side(1).delay(2)   # load 198
+  mov(x, isr)             .side(1).delay(2)   # load 148
   jmp('Half2')            .side(1)
   # End of H1 High Amplitude (100%)
 
@@ -150,13 +150,13 @@ def pioAsmDcf77Carrier():
   label('Half1Low2')
   jmp(x_dec, 'Half1Low1') .side(0).delay(2)
   nop()                   .side(1)
-  mov(x, isr)             .side(0).delay(2)   # load 198
+  mov(x, isr)             .side(0).delay(2)   # load 148
   # End of H1 Low Amplitude (25%)
 
-  # Start of Half2 (4 * 200 cycles)
+  # Start of Half2 (4 * 150 clocks)
   label('Half2')
   jmp(x_dec, 'Half2')     .side(0).delay(3)
-  mov(x, isr)             .side(0).delay(3)   # load 198
+  mov(x, isr)             .side(0).delay(3)   # load 148
   # End of Half2
   wrap()
 
@@ -196,8 +196,8 @@ class Dcf77:
     # 59: Minite mark (No amplitude modulation)
 
     # BCD
-    # 80, 40, 20, 10: 10's digit
-    # 8, 4, 2, 1    : 1's digit
+    # 10, 20, 40, 80: 10's digit
+    # 1, 2, 4, 8    : 1's digit
 
     a1 = kwargs.get('a1', 0)
     z1 = kwargs.get('z1', 0)
@@ -228,8 +228,8 @@ class Dcf77:
     return vector[:numDigits]
   def __bin(self, value: int, count: int = 1, **kwargs: dict) -> None:
     return [value & 0b1] * count
-  def __sendTimecode(self, vector: list) -> None:
-    for value in vector:
+  def __sendTimecode(self, vector: list, second: int = 0) -> None:
+    for value in vector[sec:]:
       self.lcTime.alignSecondEdge()
       if value == 0:  # bit 0
         self.__setLowerAmplitude(True)
@@ -244,13 +244,13 @@ class Dcf77:
     # start PIO
     sm = rp2.StateMachine(0, self.pioAsm, freq = SYSTEM_FREQ, jmp_pin = self.ctrlPins[0], sideset_base = self.modOutPin)
     sm.active(False)
-    sm.put(198)              # write 198 integer to FIFO
+    sm.put(SYSTEM_FREQ // DCF77_CARRIER_FREQ // 8 - 2)  # write 148 integer to FIFO
     sm.exec('pull()')        # pull FIFO
-    sm.exec('out(isr, 32)')  # out to ISR    (thus, store 198 to ISR)
-    sm.exec('mov(x, isr)')   # move ISR to X (thus, store 198 to X)
+    sm.exec('out(isr, 32)')  # out to ISR    (thus, store 148 to ISR)
+    sm.exec('mov(x, isr)')   # move ISR to X (thus, store 148 to X)
     sm.active(True)
     # start modulation
-    print(f'start DCF77 emission at {SYSTEM_FREQ / 1600} Hz')
+    print(f'start DCF77 emission at {DCF77_CARRIER_FREQ} Hz')
     self.lcTime.alignSecondEdge()
     time.sleep(0.2)  # to make same condition as marker P0
 
@@ -258,12 +258,13 @@ class Dcf77:
       t = self.lcTime.now(1)  # time for next second
       vector = self.__genTimecode(t)
       print(f'Timecode: {t}')
-      self.__sendTimecode(vector[t.second:])  # apply offset (should be only for the first time)
+      self.__sendTimecode(vector, t.second)  # apply offset (should be only for the first time)
       if secToRun > 0 and time.ticks_diff(time.ticks_ms(), ticksTimeout) > 0:
         print(f'Finished {secToRun}+ sec.')
         break
 
 def main() -> bool:
+  print(f'System Frequency: {SYSTEM_FREQ} Hz')
   machine.freq(SYSTEM_FREQ)  # recommend multiplier of 77500*2 to avoid jitter
   led = machine.Pin("LED", machine.Pin.OUT)
   led.off()
