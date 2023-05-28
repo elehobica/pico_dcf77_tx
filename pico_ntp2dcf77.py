@@ -41,7 +41,6 @@ SYSTEM_FREQ = DCF77_CARRIER_FREQ * 600 * 2
 
 # Pin Configuration
 PIN_MOD = 2   # modulation (output for PIO) base, take 2 pins
-PIN_CTRL = 3  # control (output for GPIO, input for PIO)
 
 # Seconds to run until re-sync with NTP
 # infinite if SEC_TO_RUN == 0
@@ -121,60 +120,89 @@ class LocalTime:
       time.sleep_ms(1)
 
 # PIO program
-@rp2.asm_pio(sideset_init = rp2.PIO.OUT_LOW)
+@rp2.asm_pio(sideset_init = rp2.PIO.OUT_LOW, out_shiftdir = rp2.PIO.SHIFT_RIGHT, autopull = True, fifo_join = rp2.PIO.JOIN_TX)
 def pioAsmDcf77Carrier():
   # generate 1/1200 frequency pulse against PIO clock with amplitude control by PWM
   #  jump pin from jmp_pin to control amplitude by PWM
   #  sideset pin from sideset_base to output modulation pulse
-  # assume X = ISR = 148 at program entry to make 199-times loop
+  # assume X = ISR = 148 at program entry to make 149-times loop
+  # High amplitude: 100% by PWM 4/4
+  # Low amplitude :  25% by PWM 1/4
+
+  # inst                   side    delay     # comment
+  nop()                   .side(0)           # initialize pin as 0
+
+  # ---------------------- no side-set option to keep previous pin status (start)
+  label('ClocksEnd')
+  out(y, 22)                                 # get Clocks
+  out(x, 1)                                  # get LowAmp (0: High Amp, 1: Low Amp)
+  jmp(x_dec, 'LowAmpH1Setup')
+  out(x, 1)                                  # get PhasePol (0: >= 0, 1: < 0)
+  jmp(x_dec, 'HighAmpH2Setup')
+  # HighAmpH1Setup
+  out(x, 8)                                  # get PhaseOfs (should be 0 deg or +15.6 deg)
+  jmp('HighAmpH1')
+
+  label('HighAmpH2Setup')
+  out(x, 8)                                  # get PhaseOfs (should be -15.6 deg)
+  jmp('HighAmpH2')
+
+  label('LowAmpH1Setup')
+  out(x, 1)                                  # get PhasePol (don't use)
+  out(x, 8)                                  # get PhaseOfs (should be 0 deg)
+  jmp('LowAmpH1')                 .delay(1)
+  # ---------------------- no side-set option to keep previous pin status (end)
 
   wrap_target()
-  # Start of Half1 (4 * 150 clocks)
-  # High/Low switch by jmp_pin (0: High Amplitude, 1: Low Amplitude)
-  # inst                   side    delay      # comment
-  jmp(pin, 'Half1Low2')   .side(1)
-  jmp('Half1High3')       .side(1)
-
-  # High Amplitude (100%)
-  label('Half1High1')
-  nop()                   .side(1).delay(1)
-  label('Half1High3')
-  jmp(x_dec, 'Half1High1').side(1).delay(1)
-  mov(x, isr)             .side(1).delay(2)   # load 148
-  jmp('Half2')            .side(1)
-  # End of H1 High Amplitude (100%)
-
-  # Low Amplitude (25% by PWM)
-  label('Half1Low1')
-  nop()                   .side(1)
-  label('Half1Low2')
-  jmp(x_dec, 'Half1Low1') .side(0).delay(2)
-  nop()                   .side(1)
-  mov(x, isr)             .side(0).delay(2)   # load 148
-  # End of H1 Low Amplitude (25%)
-
-  # Start of Half2 (4 * 150 clocks)
-  label('Half2')
-  jmp(x_dec, 'Half2')     .side(0).delay(3)
-  mov(x, isr)             .side(0).delay(3)   # load 148
-  # End of Half2
+  # Start of H1 of High Amplitude (4 * 150 clocks if no phase modulation)
+  label('HighAmpH1')
+  jmp(y_dec, 'ClocksEnd') .side(1)
+  jmp(x_dec, 'HighAmpH1') .side(1).delay(2)
+  mov(x, isr)             .side(1).delay(3)  # load 148
+  # End of H1 of High Amplitude
+  # Start of H2 of High Amplitude (4 * 150 clocks if no phase modulation)
+  label('HighAmpH2')
+  jmp(y_dec, 'ClocksEnd') .side(0)
+  jmp(x_dec, 'HighAmpH2') .side(0).delay(2)
+  mov(x, isr)             .side(0).delay(3)  # load 148
   wrap()
+  # End of H2 of High Amplitude
+
+  # Start of H1 of Low Amplitude (4 * 150 clocks only for no phase modulation)
+  label('LowAmpH1')
+  nop()                   .side(1)
+  jmp(x_dec, 'LowAmpH1')  .side(0).delay(2)
+  nop()                   .side(1)
+  mov(x, isr)             .side(0).delay(2)  # load 148
+  # End of H1 of Low Amplitude
+  # Start of H2 of Low Amplitude (4 * 150 clocks only for no phase modulation)
+  label('LowAmpH2')
+  jmp(y_dec, 'ClocksEnd') .side(0)
+  jmp(x_dec, 'LowAmpH2')  .side(0).delay(2)
+  mov(x, isr)             .side(0).delay(2)  # load 148
+  jmp('LowAmpH1')         .side(0)
+  # End of H2 of Low Amplitude
 
 # DCF77 class
 class Dcf77:
-  def __init__(self, lcTime: LocalTime, ctrlPins: tuple(machine.Pin), modOutPin: machine.Pin, pioAsm: Callable):
+  def __init__(self, lcTime: LocalTime, modOutPin: machine.Pin, pioAsm: Callable):
     self.lcTime = lcTime
-    self.ctrlPins = ctrlPins  # for pulse control output (could be multiple, but PIO accepts only [0] as control input)
     self.modOutPin = modOutPin  # for modulation output
     self.pioAsm = pioAsm
-    # dummy toggle because it spends much time (more than 0.6 sec) at first time
-    self.__setLowerAmplitude(False)
-    self.__setLowerAmplitude(True)
-    self.__setLowerAmplitude(False)
-  def __setLowerAmplitude(self, enable: bool) -> None:
-    for ctrlPin in self.ctrlPins:
-      ctrlPin.value(enable)  # (False for high amplitude, True for low amplitude)
   def __genTimecode(self, t: LocalTime.TimeTuple, **kwargs) -> list:
+    ## Timecode generating functions ##
+    def sync(**kwargs: dict) -> list:
+      return [2]
+    def bcd(value: int, numDigits: int = 4, **kwargs: dict) -> list:
+      vector = []
+      for bitPos in range(0, numDigits, 4):
+        bcdValue = value % 10
+        vector += [(bcdValue >> bitPos) & 0b1 for bitPos in range(4)]
+        value //= 10
+      return vector[:numDigits]
+    def bin(value: int, count: int = 1, **kwargs: dict) -> list:
+      return [value & 0b1] * count
+
     ## Timecode ##
     # 00: M: Start of minite (0)
     # 01 ~ 14: Civil warning bits: (send 0s in this program)
@@ -204,48 +232,33 @@ class Dcf77:
     z2 = kwargs.get('z2', 1)
     a2 = kwargs.get('a2', 0)
     vector = []
-    vector += self.__bin(0, name='M') + self.__bin(0, 14, name="CWB") + self.__bin(0, name='R')  # 0 ~ 15
-    vector += self.__bin(a1) + self.__bin(z1) + self.__bin(z2) + self.__bin(a2) + self.__bin(1, name='S')  # 16 ~ 20
-    vector += self.__bcd(t.minute, 7)  # 21 ~ 27
-    vector += self.__bin(sum(vector[21:]), name='P1')  # 28
-    vector += self.__bcd(t.hour, 6)  # 29 ~ 34
-    vector += self.__bin(sum(vector[29:]), name='P2')  # 35
-    vector += self.__bcd(t.mday, 6)  # 36 ~ 41
-    vector += self.__bcd(t.weekday, 3)  # 42 ~ 44
-    vector += self.__bcd(t.month, 5)  # 45 ~ 49
-    vector += self.__bcd(t.year, 8)  # 50 ~ 57
-    vector += self.__bin(sum(vector[36:]), name='P3')  # 58
-    vector += self.__sync(name='MM')  # 59
+    vector += bin(0, name='M') + bin(0, 14, name="CWB") + bin(0, name='R')  # 0 ~ 15
+    vector += bin(a1) + bin(z1) + bin(z2) + bin(a2) + bin(1, name='S')  # 16 ~ 20
+    vector += bcd(t.minute, 7)  # 21 ~ 27
+    vector += bin(sum(vector[21:]), name='P1')  # 28
+    vector += bcd(t.hour, 6)  # 29 ~ 34
+    vector += bin(sum(vector[29:]), name='P2')  # 35
+    vector += bcd(t.mday, 6)  # 36 ~ 41
+    vector += bcd(t.weekday, 3)  # 42 ~ 44
+    vector += bcd(t.month, 5)  # 45 ~ 49
+    vector += bcd(t.year, 8)  # 50 ~ 57
+    vector += bin(sum(vector[36:]), name='P3')  # 58
+    vector += sync(name='MM')  # 59
     return vector
-  def __sync(self, **kwargs: dict) -> list:
-    return [2]
-  def __bcd(self, value: int, numDigits: int = 4, **kwargs: dict) -> list:
-    vector = []
-    for bitPos in range(0, numDigits, 4):
-      bcdValue = value % 10
-      vector += [(bcdValue >> bitPos) & 0b1 for bitPos in range(4)]
-      value //= 10
-    return vector[:numDigits]
-  def __bin(self, value: int, count: int = 1, **kwargs: dict) -> None:
-    return [value & 0b1] * count
-  def __sendTimecode(self, vector: list, second: int = 0) -> None:
-    for value in vector[sec:]:
-      self.lcTime.alignSecondEdge()
-      if value == 0:  # bit 0
-        self.__setLowerAmplitude(True)
-        time.sleep(0.1)
-      elif value == 1:  # bit 1
-        self.__setLowerAmplitude(True)
-        time.sleep(0.2)
-      # otherwise, no amplitude modulation in case of synchronization (for 59s only) 
-      self.__setLowerAmplitude(False)
-  def run(self, secToRun: int = 0):
+  def __sendTimecode(self, sm: rp2.StateMachine, vector: list, second: int = 0) -> None:
+    def genFifoData(clocks: int, lowAmp: bool, negPhaseMod: bool, phaseOfs: int) -> int:
+      return ((phaseOfs & 0xff) << 24) | ((int(negPhaseMod) & 0b1) << 23) | ((int(lowAmp) & 0b1) << 22) | (clocks & 0x1fffff)
+    for value in vector[second:]:
+      for i in range(10):
+        sm.put(genFifoData(2325000-1, False, False, 148)) # 100 ms
+      print("second")
+  def run(self, secToRun: int = 0) -> None:
     ticksTimeout = time.ticks_add(time.ticks_ms(), secToRun * 1000)
     # start PIO
-    sm = rp2.StateMachine(0, self.pioAsm, freq = SYSTEM_FREQ, jmp_pin = self.ctrlPins[0], sideset_base = self.modOutPin)
+    sm = rp2.StateMachine(0, self.pioAsm, freq = SYSTEM_FREQ, sideset_base = self.modOutPin, out_shiftdir = rp2.PIO.SHIFT_LEFT)
     sm.active(False)
     sm.put(SYSTEM_FREQ // DCF77_CARRIER_FREQ // 8 - 2)  # write 148 integer to FIFO
-    sm.exec('pull()')        # pull FIFO
+    #sm.exec('pull()')        # pull FIFO
     sm.exec('out(isr, 32)')  # out to ISR    (thus, store 148 to ISR)
     sm.exec('mov(x, isr)')   # move ISR to X (thus, store 148 to X)
     sm.active(True)
@@ -258,7 +271,7 @@ class Dcf77:
       t = self.lcTime.now(1)  # time for next second
       vector = self.__genTimecode(t)
       print(f'Timecode: {t}')
-      self.__sendTimecode(vector, t.second)  # apply offset (should be only for the first time)
+      self.__sendTimecode(sm, vector, t.second)  # apply offset (should be only for the first time)
       if secToRun > 0 and time.ticks_diff(time.ticks_ms(), ticksTimeout) > 0:
         print(f'Finished {secToRun}+ sec.')
         break
@@ -282,7 +295,6 @@ def main() -> bool:
   # DCF77
   dcf77 = Dcf77(
     lcTime = lcTime,
-    ctrlPins = (machine.Pin(PIN_CTRL, machine.Pin.OUT), led),
     modOutPin = machine.Pin(PIN_MOD, machine.Pin.OUT),
     pioAsm = pioAsmDcf77Carrier,
   )
