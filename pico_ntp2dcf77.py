@@ -90,12 +90,12 @@ class LocalTime:
       else:
         return False
     @classmethod
-    def mkTimeTuple(cls, secs: int):
+    def localtime(cls, *args: list):
+      secs = utime.time() if len(args) < 1 else args[0]
       if cls.isSummerTime(secs):
-        tzNow = utime.localtime(secs + (cls.TZ + 1) * 3600)
+        return LocalTime.localtime(secs + (cls.TZ + 1) * 3600)
       else:
-        tzNow = utime.localtime(secs + cls.TZ * 3600)
-      return LocalTime.TimeTuple(utime.localtime(utime.mktime(tzNow)))
+        return LocalTime.localtime(secs + cls.TZ * 3600)
 
   @classmethod
   def syncNtp(cls):
@@ -113,19 +113,19 @@ class LocalTime:
         # reset when OSError: [Errno 110] ETIMEDOUT
         print(e)
         exit(1)
-    return LocalTime.TzCet.mkTimeTuple(utime.time())
-  @classmethod
-  def __now(cls) -> TimeTuple:
-    return LocalTime.TimeTuple(utime.localtime())
+    return LocalTime.TzCet.localtime()
   @classmethod
   def __setRtc(cls, t: TimeTuple) -> TimeTuple:
     machine.RTC().datetime((t.year, t.month, t.mday, t.weekday+1, t.hour, t.minute, t.second, 0))
     utime.sleep(1)  # wait to be reflected
-    return cls.__now()
+    return cls.localtime()
+  @classmethod
+  def localtime(cls, *args: list) -> TimeTuple:
+    return LocalTime.TimeTuple(utime.localtime(*args))
   @classmethod
   def alignSecondEdge(cls) -> None:
-    t = cls.__now()
-    while t.second == cls.__now().second:
+    t = cls.localtime()
+    while t.second == cls.localtime().second:
       utime.sleep_ms(1)
 
 # PIO program
@@ -333,7 +333,7 @@ class Dcf77:
 
     while True:
       secs = utime.time() + 61  # to send time for next "minute"
-      t = LocalTime.TimeTuple(utime.localtime(secs))
+      t = LocalTime.localtime(secs)
       print(f'Timecode: {t}')
       vector = genTimecode(t, z1 = LocalTime.TzCet.isSummerTime(secs))
       # Timecode format at https://www.dcf77logs.de/live
