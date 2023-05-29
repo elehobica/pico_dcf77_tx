@@ -77,7 +77,7 @@ class LocalTime:
     def __str__(self):
       wday = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')[self.weekday]
       month = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')[self.month-1]
-      return f'{wday} {month} {self.mday:02d}, {self.year:03d} {self.hour:02d}:{self.minute:02d}:{self.second:02d}'
+      return f'{wday}, {month} {self.mday:02d}, {self.year:04d} {self.hour:02d}:{self.minute:02d}:{self.second:02d}'
   def __init__(self, timeZone: int):
     self.ntpTime = self.__setNtpTime(timeZone)
     print(f'NTP: {self.ntpTime}')
@@ -122,7 +122,7 @@ class LocalTime:
 
 # PIO program
 @rp2.asm_pio(
-  sideset_init = rp2.PIO.OUT_LOW,
+  sideset_init = (rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW),
   out_shiftdir = rp2.PIO.SHIFT_RIGHT,
   autopull = True,
   pull_thresh = 32,
@@ -134,11 +134,15 @@ def pioAsmDcf77Carrier():
   #  sideset pin from sideset_base to output modulation pulse
   # assume ISR = 148 at program entry to make 149-times loop (corresponding to 1cyc = 1200clk / 4clk / 2turn = 150 loop)
   # use X for phase modulation by designating initial value of loop counter which determines the cycle
-  # High amplitude: 100% by PWM 0/4 - 4/4
-  # Low amplitude :  25% by PWM 3/8 - 5/8
+  # High amplitude: 100%         0°~180°: +4/4, 180°~360°: -4/4
+  # Low amplitude : 12.5% by PWM 0°~180°: +1/8, 180°~360°: -1/8
+
+  P = 0b01  # drive +
+  N = 0b10  # drive -
+  Z = 0b00  # drive zero
 
   # inst                       side    delay     # comment
-  nop()                       .side(0)           # initialize pin as 0
+  nop()                       .side(Z)           # initialize pin as 0
 
   # ---------------------- no side-set option to keep previous pin status (start)
   label('ClocksEnd')
@@ -149,11 +153,11 @@ def pioAsmDcf77Carrier():
   jmp(x_dec, 'HighAmpH2Setup')
   # HighAmpH1Setup
   out(x, 8)                                      # get PhaseOfs (should be 0 deg or +15.6 deg)
-  jmp(y_dec, 'HighAmpH1_2')   .side(1)           # always jmp
+  jmp(y_dec, 'HighAmpH1_2')   .side(P)           # always jmp
 
   label('HighAmpH2Setup')
   out(x, 8)                                      # get PhaseOfs (should be -15.6 deg)
-  jmp(y_dec, 'HighAmpH2_2')   .side(0)           # always jmp
+  jmp(y_dec, 'HighAmpH2_2')   .side(N)           # always jmp
 
   label('LowAmpH1Setup')
   out(x, 1)                                      # get PhasePol (don't use)
@@ -162,43 +166,44 @@ def pioAsmDcf77Carrier():
   # ---------------------- no side-set option to keep previous pin status (end)
 
   wrap_target()
-  # Start of H1 of High Amplitude (4 * 150 clocks if no phase modulation) pulse shape: ~~~~
+  # Start of H1 of High Amplitude (4 * 150 clocks if no phase modulation) pulse shape: ^^^^
   label('HighAmpH1')
-  jmp(y_dec, 'HighAmpH1_2')   .side(1)
-  jmp('ClocksEnd')            .side(1)
+  jmp(y_dec, 'HighAmpH1_2')   .side(P)
+  jmp('ClocksEnd')            .side(P)
   label('HighAmpH1_2')
-  jmp(x_dec, 'HighAmpH1')     .side(1).delay(2)
-  mov(x, isr)                 .side(1).delay(3)  # load 148
+  jmp(x_dec, 'HighAmpH1')     .side(P).delay(2)
+  mov(x, isr)                 .side(P).delay(3)  # load 148
   # End of H1 of High Amplitude
   # Start of H2 of High Amplitude (4 * 150 clocks if no phase modulation) pulse shape: ____
   label('HighAmpH2')
-  jmp(y_dec, 'HighAmpH2_2')   .side(0)
-  jmp('ClocksEnd')            .side(0)
+  jmp(y_dec, 'HighAmpH2_2')   .side(N)
+  jmp('ClocksEnd')            .side(N)
   label('HighAmpH2_2')
-  jmp(x_dec, 'HighAmpH2')     .side(0).delay(2)
-  mov(x, isr)                 .side(0).delay(3)  # load 148
+  jmp(x_dec, 'HighAmpH2')     .side(N).delay(2)
+  mov(x, isr)                 .side(N).delay(3)  # load 148
   wrap()
   # End of H2 of High Amplitude
 
   label('LowAmpH1_6')
-  jmp(x_dec, 'LowAmpH1')      .side(0).delay(2)  # always jmp
-  # Start of H1 of Low Amplitude (8 * 75 clocks only for no phase modulation) pulse shape: ~~~~~___
+  jmp(x_dec, 'LowAmpH1')      .side(Z).delay(2)  # always jmp
+  # Start of H1 of Low Amplitude (8 * 75 clocks only for no phase modulation) pulse shape: ^-------
   label('LowAmpH1')
-  jmp(x_dec, 'LowAmpH1_6')    .side(1).delay(4)
-  mov(x, isr)                 .side(0).delay(1)  # load 148
-  jmp('LowAmpH2')             .side(0)
+  nop()                       .side(P)
+  jmp(x_dec, 'LowAmpH1_6')    .side(Z).delay(3)
+  mov(x, isr)                 .side(Z).delay(1)  # load 148
+  jmp('LowAmpH2')             .side(Z)
   # End of H1 of Low Amplitude
 
   label('LowAmpH2_5')
-  jmp(x_dec, 'LowAmpH2')      .side(0).delay(3)  # always jmp
-  # Start of H2 of Low Amplitude (8 * 75 clocks only for no phase modulation) pulse shape: _~~~____
+  jmp(x_dec, 'LowAmpH2')      .side(Z).delay(3)  # always jmp
+  # Start of H2 of Low Amplitude (8 * 75 clocks only for no phase modulation) pulse shape: _-------
   label('LowAmpH2')
-  jmp(y_dec, 'LowAmpH2_2')    .side(0)
-  jmp('ClocksEnd')            .side(0)           # lacking pulse only last time
+  jmp(y_dec, 'LowAmpH2_2')    .side(N)
+  jmp('ClocksEnd')            .side(Z)
   label('LowAmpH2_2')
-  jmp(x_dec, 'LowAmpH2_5')    .side(1).delay(2)
-  mov(x, isr)                 .side(0).delay(2)  # load 148
-  jmp('LowAmpH1')             .side(0)
+  jmp(x_dec, 'LowAmpH2_5')    .side(Z).delay(2)
+  mov(x, isr)                 .side(Z).delay(2)  # load 148
+  jmp('LowAmpH1')             .side(Z)
   # End of H2 of Low Amplitude
 
 # DCF77 class
