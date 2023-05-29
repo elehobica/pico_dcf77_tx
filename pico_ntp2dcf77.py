@@ -68,7 +68,6 @@ def disconnectWifi():
 
 # LocalTime class for NTP and RTC
 class LocalTime:
-  CET = 1
   # utility to handle time tuple
   class TimeTuple:
     def __init__(self, timeTuple: tuple):
@@ -77,13 +76,35 @@ class LocalTime:
       wday = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')[self.weekday]
       month = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')[self.month-1]
       return f'{wday}, {month} {self.mday:02d}, {self.year:04d} {self.hour:02d}:{self.minute:02d}:{self.second:02d}'
-  def __init__(self, timeZone: int):
-    self.isSummerTime = False
-    self.ntpTime = self.__setNtpTime(timeZone)
-    print(f'NTP: {self.ntpTime}')
-    self.rtcTime = self.__setRtc(self.ntpTime)
-    print(f'RTC: {self.rtcTime}')
-  def __setNtpTime(self, timeZone: int) -> TimeTuple:
+  class TzCet:
+    TZ = 1
+    @classmethod
+    def isSummerTime(cls, secs: int):
+      tt = LocalTime.TimeTuple(utime.localtime(secs))
+      HHMarch   = utime.mktime((tt.year, 3 , (31 - (int(5 * tt.year/4 + 4)) % 7), 1, 0, 0, 0, 0, 0))  # Time of March change to CEST
+      HHOctober = utime.mktime((tt.year, 10, (31 - (int(5 * tt.year/4 + 1)) % 7), 1, 0, 0, 0, 0, 0))  # Time of October change to CET
+      if secs < HHMarch:
+        return False
+      elif secs < HHOctober:
+        return True
+      else:
+        return False
+    @classmethod
+    def mkTimeTuple(cls, secs: int):
+      if cls.isSummerTime(secs):
+        tzNow = utime.localtime(secs + (cls.TZ + 1) * 3600)
+      else:
+        tzNow = utime.localtime(secs + cls.TZ * 3600)
+      return LocalTime.TimeTuple(utime.localtime(utime.mktime(tzNow)))
+
+  @classmethod
+  def syncNtp(cls):
+    ntpTime = cls.__setNtpTime()
+    print(f'NTP: {ntpTime}')
+    rtcTime = cls.__setRtc(ntpTime)
+    print(f'RTC: {rtcTime}')
+  @classmethod
+  def __setNtpTime(cls) -> TimeTuple:
     utime.sleep(1)
     try:
       ntptime.settime()
@@ -91,34 +112,20 @@ class LocalTime:
       if e.args[0] == 110:
         # reset when OSError: [Errno 110] ETIMEDOUT
         print(e)
-        utime.sleep(5)
-        machine.reset()
-    now = utime.time()
-    if timeZone == LocalTime.CET:
-      # switch CET or CEST (https://github.com/lammersch/ntp-timer/)
-      t = utime.localtime()
-      tt = self.TimeTuple(t)
-      HHMarch   = utime.mktime((tt.year,3 ,(31 - (int(5 * tt.year/4 + 4)) % 7), 1, 0, 0, 0, 0, 0))  # Time of March change to CEST
-      HHOctober = utime.mktime((tt.year,10,(31 - (int(5 * tt.year/4 + 1)) % 7), 1, 0, 0, 0, 0, 0))  # Time of October change to CET
-      if now < HHMarch:
-        tzNow = utime.localtime(now + timeZone * 3600)
-      elif now < HHOctober:
-        tzNow = utime.localtime(now + (timeZone + 1) * 3600)
-        self.isSummerTime = True
-      else:
-        tzNow = utime.localtime(now + timeZone * 3600)
-    else:
-      tzNow = utime.localtime(now + timeZone * 3600)
-    return self.TimeTuple(utime.localtime(utime.mktime(tzNow)))
-  def __setRtc(self, t: TimeTuple) -> TimeTuple:
+        exit(1)
+    return LocalTime.TzCet.mkTimeTuple(utime.time())
+  @classmethod
+  def __now(cls) -> TimeTuple:
+    return LocalTime.TimeTuple(utime.localtime())
+  @classmethod
+  def __setRtc(cls, t: TimeTuple) -> TimeTuple:
     machine.RTC().datetime((t.year, t.month, t.mday, t.weekday+1, t.hour, t.minute, t.second, 0))
     utime.sleep(1)  # wait to be reflected
-    return self.TimeTuple(utime.localtime())
-  def now(self, offset: int = 0) -> TimeTuple:
-    return self.TimeTuple(utime.localtime(utime.time() + offset))
-  def alignSecondEdge(self):
-    t = self.now()
-    while t.second == self.now().second:
+    return cls.__now()
+  @classmethod
+  def alignSecondEdge(cls) -> None:
+    t = cls.__now()
+    while t.second == cls.__now().second:
       utime.sleep_ms(1)
 
 # PIO program
@@ -131,7 +138,6 @@ class LocalTime:
 )
 def pioAsmDcf77Carrier():
   # generate 1/1200 frequency pulse against PIO clock with amplitude control by PWM
-  #  jump pin from jmp_pin to control amplitude by PWM
   #  sideset pin from sideset_base to output modulation pulse
   # assume ISR = 148 at program entry to make 149-times loop (corresponding to 1cyc = 1200clk / 4clk / 2turn = 150 loop)
   # use X for phase modulation by designating initial value of loop counter which determines the cycle
@@ -209,8 +215,7 @@ def pioAsmDcf77Carrier():
 
 # DCF77 class
 class Dcf77:
-  def __init__(self, lcTime: LocalTime, modOutPin: machine.Pin, pioAsm: Callable):
-    self.lcTime = lcTime
+  def __init__(self, modOutPin: machine.Pin, pioAsm: Callable):
     self.modOutPin = modOutPin  # for modulation output
     self.pioAsm = pioAsm
   def run(self, secToRun: int = 0) -> None:
@@ -291,7 +296,7 @@ class Dcf77:
       HIGH_560            = genFifoData(560*149*2-1,  False, False, 149-1)  # High 560 cyc w/o phase mod
       # Send one minute data
       for value in vector[second:]:
-        self.lcTime.alignSecondEdge()
+        LocalTime.alignSecondEdge()
         if value == 0:
           sm.put(LOW_7750)
           sm.put(HIGH_7750)
@@ -322,12 +327,13 @@ class Dcf77:
     sm.active(True)
     # start modulation
     print(f'start DCF77 emission at {DCF77_CARRIER_FREQ} Hz')
-    self.lcTime.alignSecondEdge()
+    LocalTime.alignSecondEdge()
 
     while True:
-      t = self.lcTime.now(61)  # to send time for next "minute"
+      secs = utime.time() + 61  # to send time for next "minute"
+      t = LocalTime.TimeTuple(utime.localtime(secs))
       print(f'Timecode: {t}')
-      vector = genTimecode(t, z1 = self.lcTime.isSummerTime)
+      vector = genTimecode(t, z1 = LocalTime.TzCet.isSummerTime(secs))
       # Timecode format at https://www.dcf77logs.de/live
       print('-'.join(list(map(lambda v: ''.join(list(map(str, v))), [[0], vector[0:15], vector[15:21], vector[21:29], vector[29:36], vector[36:42], vector[42:45], vector[45:50], vector[50:59]]))))
       sendTimecode(sm, vector, t.second)  # apply offset (should be only for the first time)
@@ -348,12 +354,11 @@ def main() -> bool:
     utime.sleep(0.1)
     led.toggle()
   # NTP/RTC setting
-  lcTime = LocalTime(LocalTime.CET)
+  LocalTime.syncNtp()
   # disconnect WiFi
   disconnectWifi()
   # DCF77
   dcf77 = Dcf77(
-    lcTime = lcTime,
     modOutPin = machine.Pin(PIN_MOD, machine.Pin.OUT),
     pioAsm = pioAsmDcf77Carrier,
   )
