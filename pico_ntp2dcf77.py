@@ -39,7 +39,7 @@ DCF77_CARRIER_FREQ = 77500
 SYSTEM_FREQ = DCF77_CARRIER_FREQ * 600 * 2
 
 # Pin Configuration
-PIN_MOD = 2   # modulation (output for PIO) base, take 2 pins
+PIN_MOD_BASE = 2   # modulation (output for PIO) base, take 2 pins
 
 # Seconds to run until re-sync with NTP
 # infinite if SEC_TO_RUN == 0
@@ -215,8 +215,9 @@ def pioAsmDcf77Carrier():
 
 # DCF77 class
 class Dcf77:
-  def __init__(self, modOutPin: machine.Pin, pioAsm: Callable):
-    self.modOutPin = modOutPin  # for modulation output
+  def __init__(self, pinLed: machine.Pin, pinModOutBase: machine.Pin, pioAsm: Callable):
+    self.pinLed = pinLed
+    self.pinModOutBase = pinModOutBase
     self.pioAsm = pioAsm
   def run(self, secToRun: int = 0) -> None:
     # === internal functions of run() (start) ===
@@ -296,6 +297,7 @@ class Dcf77:
       HIGH_560            = genFifoData(560*149*2-1,  False, False, 149-1)  # High 560 cyc w/o phase mod
       # Send one minute data
       for value in vector[second:]:
+        self.pinLed.toggle()
         LocalTime.alignSecondEdge()
         if value == 0:
           sm.put(LOW_7750)
@@ -320,7 +322,7 @@ class Dcf77:
     # run()
     ticksTimeout = utime.ticks_add(utime.ticks_ms(), secToRun * 1000)
     # start PIO
-    sm = rp2.StateMachine(0, self.pioAsm, freq = SYSTEM_FREQ, sideset_base = self.modOutPin,)
+    sm = rp2.StateMachine(0, self.pioAsm, freq = SYSTEM_FREQ, sideset_base = self.pinModOutBase,)
     sm.active(False)
     sm.put(SYSTEM_FREQ // DCF77_CARRIER_FREQ // 8 - 2)  # write 148 integer to FIFO
     sm.exec('out(isr, 32)')  # out to ISR    (thus, store 148 to ISR)
@@ -344,22 +346,25 @@ class Dcf77:
 def main() -> bool:
   print(f'System Frequency: {SYSTEM_FREQ} Hz')
   machine.freq(SYSTEM_FREQ)  # recommend multiplier of 77500*2 to avoid jitter
-  led = machine.Pin("LED", machine.Pin.OUT)
-  led.off()
+  pinLed = machine.Pin("LED", machine.Pin.OUT)
+  pinModOutP = machine.Pin(PIN_MOD_BASE, machine.Pin.OUT)
+  pinModOutN = machine.Pin(PIN_MOD_BASE + 1, machine.Pin.OUT)
+  pinLed.off()
   # connect WiFi
   if not connectWifi():
     return False
   # LED sign for WiFi connection
   for i in range(2 * 3):
     utime.sleep(0.1)
-    led.toggle()
+    pinLed.toggle()
   # NTP/RTC setting
   LocalTime.syncNtp()
   # disconnect WiFi
   disconnectWifi()
   # DCF77
   dcf77 = Dcf77(
-    modOutPin = machine.Pin(PIN_MOD, machine.Pin.OUT),
+    pinLed = pinLed,
+    pinModOutBase = pinModOutP,
     pioAsm = pioAsmDcf77Carrier,
   )
   dcf77.run(SEC_TO_RUN)
