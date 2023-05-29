@@ -79,6 +79,7 @@ class LocalTime:
       month = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')[self.month-1]
       return f'{wday}, {month} {self.mday:02d}, {self.year:04d} {self.hour:02d}:{self.minute:02d}:{self.second:02d}'
   def __init__(self, timeZone: int):
+    self.isSummerTime = False
     self.ntpTime = self.__setNtpTime(timeZone)
     print(f'NTP: {self.ntpTime}')
     self.rtcTime = self.__setRtc(self.ntpTime)
@@ -104,6 +105,7 @@ class LocalTime:
         tzNow = time.localtime(now + timeZone * 3600)
       elif now < HHOctober:
         tzNow = time.localtime(now + (timeZone + 1) * 3600)
+        self.isSummerTime = True
       else:
         tzNow = time.localtime(now + timeZone * 3600)
     else:
@@ -212,63 +214,66 @@ class Dcf77:
     self.lcTime = lcTime
     self.modOutPin = modOutPin  # for modulation output
     self.pioAsm = pioAsm
-  def __genTimecode(self, t: LocalTime.TimeTuple, **kwargs) -> list:
-    ## Timecode generating functions ##
-    def sync(**kwargs: dict) -> list:
-      return [2]
-    def bcd(value: int, numDigits: int = 4, **kwargs: dict) -> list:
-      vector = []
-      for bitPos in range(0, numDigits, 4):
-        bcdValue = value % 10
-        vector += [(bcdValue >> bitPos) & 0b1 for bitPos in range(4)]
-        value //= 10
-      return vector[:numDigits]
-    def bin(value: int, count: int = 1, **kwargs: dict) -> list:
-      return [value & 0b1] * count
-
-    ## Timecode ##
-    # 00: M: Start of minite (0)
-    # 01 ~ 14: Civil warning bits: (send 0s in this program)
-    # 15: R: Call bit: abnormal transmitter operation (send 0 in this program)
-    # 16: A1: Summer time annousement. Set during hour before change.
-    # 17: Z1: CEST in effect
-    # 18: Z2: CET in effect
-    # 19: A2: Leap second announcement. Set during hor before leap second.
-    # 20: S: Start of encoded time (1)
-    # 21 ~ 27: Minite (00 ~ 59) BCD 1, 2, 4, 8, 10, 20, 40
-    # 28: P1: Even parity of 21 ~ 28
-    # 29 ~ 34: Hour (00 ~ 23) BCD 1, 2, 4, 8, 10, 20
-    # 35: P2: Even parity of 29 ~ 35
-    # 36 ~ 41: Day of month (01 ~ 31) BCD 1, 2, 4, 8, 10, 20
-    # 42 ~ 44: Wday (1: Mon, 7: Sun) BCD 1, 2, 4
-    # 45 ~ 49: Month (01 ~ 12) BCD 1, 2, 4, 8, 10
-    # 50 ~ 57: Year(2) (00 ~ 99) BCD 1, 2, 4, 8, 10, 20, 40, 80
-    # 58: P3: Even parity of 36 ~ 58
-    # 59: Minite mark (No amplitude modulation)
-
-    # BCD
-    # 10, 20, 40, 80: 10's digit
-    # 1, 2, 4, 8    : 1's digit
-
-    a1 = kwargs.get('a1', 0)
-    z1 = kwargs.get('z1', 0)
-    z2 = kwargs.get('z2', 1)
-    a2 = kwargs.get('a2', 0)
-    vector = []
-    vector += bin(0, name='M') + bin(0, 14, name="CWB") + bin(0, name='R')  # 0 ~ 15
-    vector += bin(a1) + bin(z1) + bin(z2) + bin(a2) + bin(1, name='S')  # 16 ~ 20
-    vector += bcd(t.minute, 7)  # 21 ~ 27
-    vector += bin(sum(vector[21:]), name='P1')  # 28
-    vector += bcd(t.hour, 6)  # 29 ~ 34
-    vector += bin(sum(vector[29:]), name='P2')  # 35
-    vector += bcd(t.mday, 6)  # 36 ~ 41
-    vector += bcd(t.weekday, 3)  # 42 ~ 44
-    vector += bcd(t.month, 5)  # 45 ~ 49
-    vector += bcd(t.year, 8)  # 50 ~ 57
-    vector += bin(sum(vector[36:]), name='P3')  # 58
-    vector += sync(name='MM')  # 59
-    return vector
   def run(self, secToRun: int = 0) -> None:
+    # === internal functions of run() (start) ===
+    def genTimecode(t: LocalTime.TimeTuple, **kwargs: dict) -> list:
+      ## Timecode generating functions ##
+      def sync(**kwargs: dict) -> list:
+        return [2]
+      def bcd(value: int, numDigits: int = 4, **kwargs: dict) -> list:
+        vector = []
+        for bitPos in range(0, numDigits, 4):
+          bcdValue = value % 10
+          vector += [(bcdValue >> bitPos) & 0b1 for bitPos in range(4)]
+          value //= 10
+        return vector[:numDigits]
+      def bin(value: int, count: int = 1, **kwargs: dict) -> list:
+        return [value & 0b1] * count
+      def parity(vector: list, **kwargs: dict) -> list:
+        return bin(sum(vector), **kwargs)
+
+      ## Timecode ##
+      # 00: M: Start of minute (0)
+      # 01 ~ 14: Civil warning bits: (send 0s in this program)
+      # 15: R: Call bit: abnormal transmitter operation (send 0 in this program)
+      # 16: A1: Summer time annousement. Set during hour before change.
+      # 17: Z1: CEST in effect
+      # 18: Z2: CET in effect
+      # 19: A2: Leap second announcement. Set during hour before leap second.
+      # 20: S: Start of encoded time (1)
+      # 21 ~ 27: Minute (00 ~ 59) BCD 1, 2, 4, 8, 10, 20, 40
+      # 28: P1: Even parity of 21 ~ 28
+      # 29 ~ 34: Hour (00 ~ 23) BCD 1, 2, 4, 8, 10, 20
+      # 35: P2: Even parity of 29 ~ 35
+      # 36 ~ 41: Day of month (01 ~ 31) BCD 1, 2, 4, 8, 10, 20
+      # 42 ~ 44: Wday (1: Mon, 7: Sun) BCD 1, 2, 4
+      # 45 ~ 49: Month (01 ~ 12) BCD 1, 2, 4, 8, 10
+      # 50 ~ 57: Year(2) (00 ~ 99) BCD 1, 2, 4, 8, 10, 20, 40, 80
+      # 58: P3: Even parity of 36 ~ 58
+      # 59: Minute mark (No amplitude modulation)
+
+      # BCD
+      # 10, 20, 40, 80: 10's digit
+      # 1, 2, 4, 8    : 1's digit
+
+      a1 = int(kwargs.get('a1', False))
+      z1 = int(kwargs.get('z1', False))
+      z2 = 1 - z1
+      a2 = int(kwargs.get('a2', False))
+      vector = []
+      vector += bin(0, name='M') + bin(0, 14, name="CWB")  # 0 ~ 14
+      vector += bin(0, name='R') + bin(a1) + bin(z1) + bin(z2) + bin(a2) + bin(1, name='S')  # 15 ~ 20
+      vector += bcd(t.minute, 7)  # 21 ~ 27
+      vector += parity(vector[21:], name='P1')  # 28
+      vector += bcd(t.hour, 6)  # 29 ~ 34
+      vector += parity(vector[29:], name='P2')  # 35
+      vector += bcd(t.mday, 6)  # 36 ~ 41
+      vector += bcd(t.weekday + 1, 3)  # 42 ~ 44
+      vector += bcd(t.month, 5)  # 45 ~ 49
+      vector += bcd(t.year, 8)  # 50 ~ 57
+      vector += parity(vector[36:], name='P3')  # 58
+      vector += sync(name='MM')  # 59
+      return vector
     def sendTimecode(sm: rp2.StateMachine, vector: list, second: int = 0) -> None:
       def genFifoData(clocks: int, lowAmp: bool, negPhaseMod: bool, phaseOfs: int) -> int:
         # FIFO data description
@@ -285,7 +290,7 @@ class Dcf77:
       HIGH_120_PLUS_15P6  = genFifoData(120*149*2-1,  False, False, 136-1)  # High 120 cyc w/ +15.6 deg
       HIGH_120_MINUS_15P6 = genFifoData(120*149*2-1,  False, True,  12-1)   # High 120 cyc w/ -15.6 deg
       HIGH_560            = genFifoData(560*149*2-1,  False, False, 149-1)  # High 560 cyc w/o phase mod
-      # Send one minite data
+      # Send one minute data
       for value in vector[second:]:
         self.lcTime.alignSecondEdge()
         if value == 0:
@@ -306,7 +311,9 @@ class Dcf77:
         else:  # synchronization
           for i in range(10):
             sm.put(HIGH_7750)
-    # run
+    # === internal functions of run() (end) ===
+
+    # run()
     ticksTimeout = time.ticks_add(time.ticks_ms(), secToRun * 1000)
     # start PIO
     sm = rp2.StateMachine(0, self.pioAsm, freq = SYSTEM_FREQ, sideset_base = self.modOutPin,)
@@ -319,9 +326,11 @@ class Dcf77:
     self.lcTime.alignSecondEdge()
 
     while True:
-      t = self.lcTime.now(1)  # time for next second
-      vector = self.__genTimecode(t)
+      t = self.lcTime.now(61)  # to send time for next "minute"
       print(f'Timecode: {t}')
+      vector = genTimecode(t, z1 = self.lcTime.isSummerTime)
+      # Timecode format at https://www.dcf77logs.de/live
+      print('-'.join(list(map(lambda v: ''.join(list(map(str, v))), [[0], vector[0:15], vector[15:21], vector[21:29], vector[29:36], vector[36:42], vector[42:45], vector[45:50], vector[50:59]]))))
       sendTimecode(sm, vector, t.second)  # apply offset (should be only for the first time)
       if secToRun > 0 and time.ticks_diff(time.ticks_ms(), ticksTimeout) > 0:
         print(f'Finished {secToRun}+ sec.')
