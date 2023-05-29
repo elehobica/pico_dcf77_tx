@@ -22,7 +22,6 @@
 
 import machine
 import rp2
-import time 
 import utime
 import network
 import ntptime
@@ -57,7 +56,7 @@ def connectWifi():
     if wlan.isconnected():
       print('WiFi connected')
       break
-    time.sleep(1)
+    utime.sleep(1)
   else:
     print('WiFi not connected')
     return False
@@ -85,42 +84,42 @@ class LocalTime:
     self.rtcTime = self.__setRtc(self.ntpTime)
     print(f'RTC: {self.rtcTime}')
   def __setNtpTime(self, timeZone: int) -> TimeTuple:
-    time.sleep(1)
+    utime.sleep(1)
     try:
       ntptime.settime()
     except OSError as e:
       if e.args[0] == 110:
         # reset when OSError: [Errno 110] ETIMEDOUT
         print(e)
-        time.sleep(5)
+        utime.sleep(5)
         machine.reset()
-    now = time.time()
+    now = utime.time()
     if timeZone == LocalTime.CET:
       # switch CET or CEST (https://github.com/lammersch/ntp-timer/)
-      t = time.localtime()
+      t = utime.localtime()
       tt = self.TimeTuple(t)
-      HHMarch   = time.mktime((tt.year,3 ,(31 - (int(5 * tt.year/4 + 4)) % 7), 1, 0, 0, 0, 0, 0))  # Time of March change to CEST
-      HHOctober = time.mktime((tt.year,10,(31 - (int(5 * tt.year/4 + 1)) % 7), 1, 0, 0, 0, 0, 0))  # Time of October change to CET
+      HHMarch   = utime.mktime((tt.year,3 ,(31 - (int(5 * tt.year/4 + 4)) % 7), 1, 0, 0, 0, 0, 0))  # Time of March change to CEST
+      HHOctober = utime.mktime((tt.year,10,(31 - (int(5 * tt.year/4 + 1)) % 7), 1, 0, 0, 0, 0, 0))  # Time of October change to CET
       if now < HHMarch:
-        tzNow = time.localtime(now + timeZone * 3600)
+        tzNow = utime.localtime(now + timeZone * 3600)
       elif now < HHOctober:
-        tzNow = time.localtime(now + (timeZone + 1) * 3600)
+        tzNow = utime.localtime(now + (timeZone + 1) * 3600)
         self.isSummerTime = True
       else:
-        tzNow = time.localtime(now + timeZone * 3600)
+        tzNow = utime.localtime(now + timeZone * 3600)
     else:
-      tzNow = time.localtime(now + timeZone * 3600)
+      tzNow = utime.localtime(now + timeZone * 3600)
     return self.TimeTuple(utime.localtime(utime.mktime(tzNow)))
   def __setRtc(self, t: TimeTuple) -> TimeTuple:
     machine.RTC().datetime((t.year, t.month, t.mday, t.weekday+1, t.hour, t.minute, t.second, 0))
-    time.sleep(1)  # wait to be reflected
-    return self.TimeTuple(time.localtime())
+    utime.sleep(1)  # wait to be reflected
+    return self.TimeTuple(utime.localtime())
   def now(self, offset: int = 0) -> TimeTuple:
-    return self.TimeTuple(time.localtime(time.time() + offset))
+    return self.TimeTuple(utime.localtime(utime.time() + offset))
   def alignSecondEdge(self):
     t = self.now()
     while t.second == self.now().second:
-      time.sleep_ms(1)
+      utime.sleep_ms(1)
 
 # PIO program
 @rp2.asm_pio(
@@ -314,7 +313,7 @@ class Dcf77:
     # === internal functions of run() (end) ===
 
     # run()
-    ticksTimeout = time.ticks_add(time.ticks_ms(), secToRun * 1000)
+    ticksTimeout = utime.ticks_add(utime.ticks_ms(), secToRun * 1000)
     # start PIO
     sm = rp2.StateMachine(0, self.pioAsm, freq = SYSTEM_FREQ, sideset_base = self.modOutPin,)
     sm.active(False)
@@ -332,7 +331,7 @@ class Dcf77:
       # Timecode format at https://www.dcf77logs.de/live
       print('-'.join(list(map(lambda v: ''.join(list(map(str, v))), [[0], vector[0:15], vector[15:21], vector[21:29], vector[29:36], vector[36:42], vector[42:45], vector[45:50], vector[50:59]]))))
       sendTimecode(sm, vector, t.second)  # apply offset (should be only for the first time)
-      if secToRun > 0 and time.ticks_diff(time.ticks_ms(), ticksTimeout) > 0:
+      if secToRun > 0 and utime.ticks_diff(utime.ticks_ms(), ticksTimeout) > 0:
         print(f'Finished {secToRun}+ sec.')
         break
 
@@ -346,7 +345,7 @@ def main() -> bool:
     return False
   # LED sign for WiFi connection
   for i in range(2 * 3):
-    time.sleep(0.1)
+    utime.sleep(0.1)
     led.toggle()
   # NTP/RTC setting
   lcTime = LocalTime(LocalTime.CET)
@@ -360,7 +359,7 @@ def main() -> bool:
   )
   dcf77.run(SEC_TO_RUN)
   print('System reset to sync NTP again')
-  time.sleep(5)
+  utime.sleep(5)
   machine.reset()
   return True
 
