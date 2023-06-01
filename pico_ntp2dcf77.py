@@ -241,9 +241,8 @@ class Dcf77:
       self.__genFifoData(120*149*2-1,  False, True,  12-1),  # High 120 cyc w/ -15.6 deg
     )
     # Preset series of phase modulation FIFO data by LFSR
-    self.__pm0 = array.array('I', [self.HIGH_120_PM[chip] for chip in genLfsrChips()])
-    self.__pm1 = array.array('I', [self.HIGH_120_PM[1 - chip] for chip in genLfsrChips()])
-
+    self.PM0 = array.array('I', (self.HIGH_120_PM[chip] for chip in genLfsrChips()))
+    self.PM1 = array.array('I', (self.HIGH_120_PM[1 - chip] for chip in genLfsrChips()))
   def __genFifoData(self, clocks: int, lowAmp: bool, negPhaseMod: bool, phaseOfs: int) -> int:
     # FIFO data description
     # [31:24] PhaseOfs : set 148 for 0°, 135 for +15.6° and 11 for -15.6°
@@ -313,6 +312,10 @@ class Dcf77:
       vector += sync(name='MM')  # 59
       return vector
     def sendTimecode(sm: rp2.StateMachine, vector: list, second: int = 0) -> None:
+      def putSmFifo(*args) -> None:
+        if sm.tx_fifo() == 0:
+          print("ERROR: PIO StateMachine TX_FIFO empty")
+        sm.put(*args)
       def sendPhaseModulation(index: int, value: int) -> None:
         # overwrite value for phase modulation if needed
         if index < 10:
@@ -320,22 +323,24 @@ class Dcf77:
         elif index < 15 or index == 59:
           value = 0b0
         # send phase modulation with chips
-        sm.put(self.__pm0 if value == 0b0 else self.__pm1)
+        putSmFifo(self.PM0 if value == 0b0 else self.PM1)
       # Send one minute data
       for i in range(second, 60):
         value = vector[i]
-        LocalTime.alignSecondEdge()
+        # no need to align second's edge here
+        # because PIO should consume exact one minute of cycles
+        # however please note that it runs with 'not so accurate' PLL clocks as a clock
         self.pinLed.toggle()
         if value == 0:
-          sm.put(self.LOW_7750)
-          sm.put(self.HIGH_7750)
+          putSmFifo(self.LOW_7750)
+          putSmFifo(self.HIGH_7750)
         elif value == 1:
-          sm.put(self.LOW_15500)
+          putSmFifo(self.LOW_15500)
         else:  # synchronization
-          sm.put(self.HIGH_7750)
-          sm.put(self.HIGH_7750)
+          putSmFifo(self.HIGH_7750)
+          putSmFifo(self.HIGH_7750)
         sendPhaseModulation(i, value)
-        sm.put(self.HIGH_560)
+        putSmFifo(self.HIGH_560)
     # === internal functions of run() (end) ===
 
     # run()
