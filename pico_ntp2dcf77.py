@@ -25,6 +25,7 @@ import rp2
 import utime
 import network
 import ntptime
+import array
 
 # write ssid and password as 'secrets' dict in secrets.py
 from secrets import secrets
@@ -36,6 +37,7 @@ TZ_CET_OFS = 1
 DCF77_CARRIER_FREQ = 77500
 
 # System Frequency to set multiplier of DCF77 frequency
+# it also should be 300's multiplier to realize 15.6° phase modulation
 SYSTEM_FREQ = DCF77_CARRIER_FREQ * 600 * 2
 
 # Pin Configuration
@@ -216,18 +218,31 @@ def pioAsmDcf77Carrier():
 # DCF77 class
 class Dcf77:
   def __init__(self, pinLed: machine.Pin, pinModOutBase: machine.Pin, pioAsm: Callable):
+    def genLfsrChips() -> None:
+      chips = []
+      lfsr = 0
+      for i in range(512):
+        chip = lfsr & 0b1
+        chips.append(chip)
+        lfsr >>= 1
+        if chip == 0b1 or lfsr == 0:
+          lfsr ^= 0x110
+      return chips
     self.pinLed = pinLed
     self.pinModOutBase = pinModOutBase
     self.pioAsm = pioAsm
     # Preset data for FIFO
-    self.LOW_7750            = self.__genFifoData(7750*75-1,    True,  False, 149-1)  # Low 7750 cyc (100 ms) w/o phase mod
-    self.LOW_15500           = self.__genFifoData(15500*75-1,   True,  False, 149-1)  # Low 15500 cyc (200 ms) w/o phase mod
-    self.HIGH_7750           = self.__genFifoData(7750*149*2-1, False, False, 149-1)  # High 7750 cyc (100 ms) w/o phase mod
-    self.HIGH_120_PLUS_15P6  = self.__genFifoData(120*149*2-1,  False, False, 136-1)  # High 120 cyc w/ +15.6 deg
-    self.HIGH_120_MINUS_15P6 = self.__genFifoData(120*149*2-1,  False, True,  12-1)   # High 120 cyc w/ -15.6 deg
-    self.HIGH_560            = self.__genFifoData(560*149*2-1,  False, False, 149-1)  # High 560 cyc w/o phase mod
-    # Preset LFSR
-    self.__genLfsrChips()
+    self.LOW_7750  = self.__genFifoData(7750*75-1,    True,  False, 149-1)  # Low 7750 cyc (100 ms) w/o phase mod
+    self.LOW_15500 = self.__genFifoData(15500*75-1,   True,  False, 149-1)  # Low 15500 cyc (200 ms) w/o phase mod
+    self.HIGH_7750 = self.__genFifoData(7750*149*2-1, False, False, 149-1)  # High 7750 cyc (100 ms) w/o phase mod
+    self.HIGH_560 = self.__genFifoData(560*149*2-1,  False, False, 149-1)  # High 560 cyc w/o phase mod
+    self.HIGH_120_PM = (
+      self.__genFifoData(120*149*2-1,  False, False, 136-1),  # High 120 cyc w/ +15.6 deg
+      self.__genFifoData(120*149*2-1,  False, True,  12-1),  # High 120 cyc w/ -15.6 deg
+    )
+    # Preset series of phase modulation FIFO data by LFSR
+    self.__pm0 = array.array('I', [self.HIGH_120_PM[chip] for chip in genLfsrChips()])
+    self.__pm1 = array.array('I', [self.HIGH_120_PM[1 - chip] for chip in genLfsrChips()])
 
   def __genFifoData(self, clocks: int, lowAmp: bool, negPhaseMod: bool, phaseOfs: int) -> int:
     # FIFO data description
@@ -237,20 +252,6 @@ class Dcf77:
     # [21:0]  Clocks   : High Amplitude case - Clocks/4 incl. adj.  set 7750*149*2-1 for 7750 cycles
     #                    Low Amplitude case  - Clocks/16 incl. adj. set 7750*75-1    for 7750 cycles
     return ((phaseOfs & 0xff) << 24) | ((int(negPhaseMod) & 0b1) << 23) | ((int(lowAmp) & 0b1) << 22) | (clocks & 0x3fffff)
-  def __genLfsrChips(self) -> None:
-    self.LFSR_CHIPS0 = []
-    self.LFSR_CHIPS1 = []
-    lfsr = 0
-    chips = 0
-    for i in range(512):
-      chip = lfsr & 0b1
-      self.LFSR_CHIPS0.append(chip)
-      self.LFSR_CHIPS1.append(1 - chip)
-      lfsr >>= 1
-      if chip == 0b1 or lfsr == 0:
-        lfsr ^= 0x110
-    self.LFSR_CHIPS0 = tuple(self.LFSR_CHIPS0)
-    self.LFSR_CHIPS1 = tuple(self.LFSR_CHIPS1)
   def run(self, secToRun: int = 0) -> None:
     # === internal functions of run() (start) ===
     def genTimecode(t: LocalTime.TimeTuple, **kwargs: dict) -> list:
@@ -313,20 +314,13 @@ class Dcf77:
       return vector
     def sendTimecode(sm: rp2.StateMachine, vector: list, second: int = 0) -> None:
       def sendPhaseModulation(index: int, value: int) -> None:
-        # this function should run as fast as possible because each chip term is only 1.548 ms,
-        #  otherwise PIO state machine stalls
         # overwrite value for phase modulation if needed
         if index < 10:
           value = 0b1
         elif index < 15 or index == 59:
           value = 0b0
-        chips = self.LFSR_CHIPS0 if value == 0b0 else self.LFSR_CHIPS1
         # send phase modulation with chips
-        for chip in chips:
-          if chip == 0b0:
-            sm.put(self.HIGH_120_PLUS_15P6)
-          else:
-            sm.put(self.HIGH_120_MINUS_15P6)
+        sm.put(self.__pm0 if value == 0b0 else self.__pm1)
       # Send one minute data
       for i in range(second, 60):
         value = vector[i]
@@ -362,11 +356,11 @@ class Dcf77:
       print(f'Timecode: {t}')
       vector = genTimecode(t, z1 = LocalTime.TzCet.isSummerTime(secs))
       # Timecode format at https://www.dcf77logs.de/live
-      print('-'.join(list(map(lambda v: ''.join(list(map(str, v))), [[0], vector[0:15], vector[15:21], vector[21:29], vector[29:36], vector[36:42], vector[42:45], vector[45:50], vector[50:59]]))))
+      #print('-'.join(list(map(lambda v: ''.join(list(map(str, v))), [[0], vector[0:15], vector[15:21], vector[21:29], vector[29:36], vector[36:42], vector[42:45], vector[45:50], vector[50:59]]))))
       sendTimecode(sm, vector, t.second)  # apply offset (should be only for the first time)
-      if secToRun > 0 and utime.ticks_diff(utime.ticks_ms(), ticksTimeout) > 0:
-        print(f'Finished {secToRun}+ sec.')
-        break
+      #if secToRun > 0 and utime.ticks_diff(utime.ticks_ms(), ticksTimeout) > 0:
+      #  print(f'Finished {secToRun}+ sec.')
+      #  break
 
 def main() -> bool:
   print(f'System Frequency: {SYSTEM_FREQ} Hz')
