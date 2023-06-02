@@ -218,55 +218,56 @@ def pioAsmDcf77Carrier():
 # DCF77 class
 class Dcf77:
   def __init__(self, pinLed: machine.Pin, pinModOutBase: machine.Pin, pioAsm: Callable):
-    def genLfsrChips() -> None:
-      chips = []
+    def genFifoData(clocks: int, lowAmp: bool, negPhaseMod: bool, phaseOfs: int) -> int:
+      # FIFO data description
+      # [31:24] PhaseOfs : set 148 for 0°, 135 for +15.6° and 11 for -15.6°
+      # [23]    PhasePol : 0: >=0, 1: < 0
+      # [22]    LowAmp   : 0: High Amplitude, 1: Low Amplitude
+      # [21:0]  Clocks   : High Amplitude case - Clocks/4 incl. adj.  set 7750*149*2-1 for 7750 cycles
+      #                    Low Amplitude case  - Clocks/16 incl. adj. set 7750*75-1    for 7750 cycles
+      return ((phaseOfs & 0xff) << 24) | ((int(negPhaseMod) & 0b1) << 23) | ((int(lowAmp) & 0b1) << 22) | (clocks & 0x3fffff)
+    # Generate 512 chips for phase modulation by LFSR
+    def genLfsrChips() -> Iterator[int]:
       lfsr = 0
       for i in range(512):
         chip = lfsr & 0b1
-        chips.append(chip)
+        yield chip
         lfsr >>= 1
         if chip == 0b1 or lfsr == 0:
           lfsr ^= 0x110
-      return chips
     self.pinLed = pinLed
     self.pinModOutBase = pinModOutBase
     self.pioAsm = pioAsm
     # Preset data for FIFO
-    self.LOW_7750  = self.__genFifoData(7750*75-1,    True,  False, 149-1)  # Low 7750 cyc (100 ms) w/o phase mod
-    self.LOW_15500 = self.__genFifoData(15500*75-1,   True,  False, 149-1)  # Low 15500 cyc (200 ms) w/o phase mod
-    self.HIGH_7750 = self.__genFifoData(7750*149*2-1, False, False, 149-1)  # High 7750 cyc (100 ms) w/o phase mod
-    self.HIGH_560 = self.__genFifoData(560*149*2-1,  False, False, 149-1)  # High 560 cyc w/o phase mod
-    self.HIGH_120_PM = (
-      self.__genFifoData(120*149*2-1,  False, False, 136-1),  # High 120 cyc w/ +15.6 deg
-      self.__genFifoData(120*149*2-1,  False, True,  12-1),  # High 120 cyc w/ -15.6 deg
+    self.LOW_7750  = genFifoData(7750*75-1,    True,  False, 149-1)  # Low 7750 cyc (100 ms) w/o phase mod
+    self.LOW_15500 = genFifoData(15500*75-1,   True,  False, 149-1)  # Low 15500 cyc (200 ms) w/o phase mod
+    self.HIGH_7750 = genFifoData(7750*149*2-1, False, False, 149-1)  # High 7750 cyc (100 ms) w/o phase mod
+    self.HIGH_560  = genFifoData(560*149*2-1,  False, False, 149-1)  # High 560 cyc w/o phase mod
+    # Preset series of phase modulation FIFO data by LFSR (120 cycle per chip * 512)
+    HIGH_120_PM_CHIP = (
+      genFifoData(120*149*2-1,  False, False, 136-1),  # High 120 cyc w/ +15.6 deg
+      genFifoData(120*149*2-1,  False, True,  12-1),  # High 120 cyc w/ -15.6 deg
     )
-    # Preset series of phase modulation FIFO data by LFSR
-    self.PM0 = array.array('I', (self.HIGH_120_PM[chip] for chip in genLfsrChips()))
-    self.PM1 = array.array('I', (self.HIGH_120_PM[1 - chip] for chip in genLfsrChips()))
-  def __genFifoData(self, clocks: int, lowAmp: bool, negPhaseMod: bool, phaseOfs: int) -> int:
-    # FIFO data description
-    # [31:24] PhaseOfs : set 148 for 0°, 135 for +15.6° and 11 for -15.6°
-    # [23]    PhasePol : 0: >=0, 1: < 0
-    # [22]    LowAmp   : 0: High Amplitude, 1: Low Amplitude
-    # [21:0]  Clocks   : High Amplitude case - Clocks/4 incl. adj.  set 7750*149*2-1 for 7750 cycles
-    #                    Low Amplitude case  - Clocks/16 incl. adj. set 7750*75-1    for 7750 cycles
-    return ((phaseOfs & 0xff) << 24) | ((int(negPhaseMod) & 0b1) << 23) | ((int(lowAmp) & 0b1) << 22) | (clocks & 0x3fffff)
+    self.HIGH_61440_PM = (
+      array.array('I', (HIGH_120_PM_CHIP[chip] for chip in genLfsrChips())),
+      array.array('I', (HIGH_120_PM_CHIP[1 - chip] for chip in genLfsrChips())),
+    )
   def run(self, secToRun: int = 0) -> None:
     # === internal functions of run() (start) ===
-    def genTimecode(t: LocalTime.TimeTuple, **kwargs: dict) -> list:
+    def genTimecode(t: LocalTime.TimeTuple, **kwargs: dict) -> list[int]:
       ## Timecode generating functions ##
       def sync(**kwargs: dict) -> list:
         return [2]
-      def bcd(value: int, numDigits: int = 4, **kwargs: dict) -> list:
-        vector = []
-        for bitPos in range(0, numDigits, 4):
-          bcdValue = value % 10
-          vector += [(bcdValue >> bitPos) & 0b1 for bitPos in range(4)]
-          value //= 10
-        return vector[:numDigits]
-      def bin(value: int, count: int = 1, **kwargs: dict) -> list:
+      def bcd(value: int, numDigits: int = 4, **kwargs: dict) -> Iterator[int]:
+        for bitPos in range(0, numDigits):
+          if bitPos % 4 == 0:
+            bcdValue = value % 10
+          yield (bcdValue >> (bitPos % 4)) & 0b1
+          if bitPos % 4 == 3:
+            value //= 10
+      def bin(value: int, count: int = 1, **kwargs: dict) -> list[int]:
         return [value & 0b1] * count
-      def parity(vector: list, **kwargs: dict) -> list:
+      def parity(vector: list, **kwargs: dict) -> list[int]:
         return bin(sum(vector), **kwargs)
 
       ## Timecode ##
@@ -312,18 +313,17 @@ class Dcf77:
       vector += sync(name='MM')  # 59
       return vector
     def sendTimecode(sm: rp2.StateMachine, vector: list, second: int = 0) -> None:
-      def putSmFifo(*args) -> None:
+      def putSmFifo(arg: int | array.array) -> None:
         if sm.tx_fifo() == 0:
           print("ERROR: PIO StateMachine TX_FIFO empty")
-        sm.put(*args)
-      def sendPhaseModulation(index: int, value: int) -> None:
+        sm.put(arg)
+      def getPmValue(index: int, value: int) -> int:
         # overwrite value for phase modulation if needed
         if index < 10:
           value = 0b1
         elif index < 15 or index == 59:
           value = 0b0
-        # send phase modulation with chips
-        putSmFifo(self.PM0 if value == 0b0 else self.PM1)
+        return value
       # Send one minute data
       for i in range(second, 60):
         value = vector[i]
@@ -339,7 +339,7 @@ class Dcf77:
         else:  # synchronization
           putSmFifo(self.HIGH_7750)
           putSmFifo(self.HIGH_7750)
-        sendPhaseModulation(i, value)
+        putSmFifo(self.HIGH_61440_PM[getPmValue(i, value)])  # array.array
         putSmFifo(self.HIGH_560)
     # === internal functions of run() (end) ===
 
