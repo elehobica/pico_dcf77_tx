@@ -26,6 +26,7 @@ import utime
 import network
 import ntptime
 import array
+import _thread
 
 # write ssid and password as 'secrets' dict in secrets.py
 from secrets import secrets
@@ -267,7 +268,7 @@ class Dcf77:
             value //= 10
       def bin(value: int, count: int = 1, **kwargs: dict) -> list[int]:
         return [value & 0b1] * count
-      def parity(vector: list, **kwargs: dict) -> list[int]:
+      def parity(vector: list[int], **kwargs: dict) -> list[int]:
         return bin(sum(vector), **kwargs)
 
       ## Timecode ##
@@ -312,7 +313,7 @@ class Dcf77:
       vector += parity(vector[36:], name='P3')  # 58
       vector += sync(name='MM')  # 59
       return vector
-    def sendTimecode(sm: rp2.StateMachine, vector: list, second: int = 0) -> None:
+    def sendTimecode(sm: rp2.StateMachine, vector: list[int], second: int = 0) -> None:
       def putSmFifo(arg: int | array.array) -> None:
         if sm.tx_fifo() == 0:
           print("ERROR: PIO StateMachine TX_FIFO empty")
@@ -356,12 +357,14 @@ class Dcf77:
     LocalTime.alignSecondEdge()
 
     while True:
+      def printTimecode(t: LocalTime.TimeTuple, vector: list[int]):
+        print(f'Timecode: {t}')
+        # Timecode format of https://www.dcf77logs.de/live
+        #print('-'.join(list(map(lambda v: ''.join(list(map(str, v))), [[0], vector[0:15], vector[15:21], vector[21:29], vector[29:36], vector[36:42], vector[42:45], vector[45:50], vector[50:59]]))))
       secs = utime.time() + 61  # to send time for next "minute"
       t = LocalTime.localtime(secs)
-      print(f'Timecode: {t}')
       vector = genTimecode(t, z1 = LocalTime.TzCet.isSummerTime(secs))
-      # Timecode format at https://www.dcf77logs.de/live
-      #print('-'.join(list(map(lambda v: ''.join(list(map(str, v))), [[0], vector[0:15], vector[15:21], vector[21:29], vector[29:36], vector[36:42], vector[42:45], vector[45:50], vector[50:59]]))))
+      _thread.start_new_thread(printTimecode, (t, vector,))
       sendTimecode(sm, vector, t.second)  # apply offset (should be only for the first time)
       #if secToRun > 0 and utime.ticks_diff(utime.ticks_ms(), ticksTimeout) > 0:
       #  print(f'Finished {secToRun}+ sec.')
