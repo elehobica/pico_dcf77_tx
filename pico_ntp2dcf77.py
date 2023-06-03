@@ -20,6 +20,7 @@
 # different license policies, look at the subdirectories of lib directory.
 # ------------------------------------------------------
 
+import sys
 import machine
 import rp2
 import utime
@@ -115,7 +116,7 @@ class LocalTime:
       if e.args[0] == 110:
         # reset when OSError: [Errno 110] ETIMEDOUT
         print(e)
-        exit(1)
+        sys.exit(1)
     return LocalTime.TzCet.localtime()
   @classmethod
   def __setRtc(cls, t: TimeTuple) -> TimeTuple:
@@ -295,7 +296,19 @@ class Dcf77:
       self.vector += parity(self.vector[36:], name='P3')  # 58
       self.vector += sync(name='MM')  # 59
   def __init__(self, pinLed: machine.Pin, pinModOutBase: machine.Pin, pioAsm: Callable):
-    def genFifoData(clocks: int, lowAmp: bool, negPhaseMod: bool, phaseOfs: int) -> int:
+    def genFifoData(cycles: int, lowAmp: bool, phase: float = 0.0) -> int:
+      CLOCKS_77500HZ_DIV8 = SYSTEM_FREQ // DCF77_CARRIER_FREQ // 8  # 150 (77500 KHz H1 term 4 cycles + H2 term 4 cycles)
+      # the difference of the value of clocks between amplitudes is caused by PIO asm program
+      clocks = cycles * (CLOCKS_77500HZ_DIV8 // 2) - 1 if lowAmp else cycles * (CLOCKS_77500HZ_DIV8 - 1) * 2 - 1
+      if lowAmp:
+        phase = 0.0
+      # phaseOfs : initial value of down counter, by which phase shift is generated
+      if phase >= 0.0:
+        negPhaseMod = False
+        phaseOfs = CLOCKS_77500HZ_DIV8 - int(round((CLOCKS_77500HZ_DIV8 * 2) * phase / 360.0, 0)) - 2
+      else:
+        negPhaseMod = True
+        phaseOfs = int(round((CLOCKS_77500HZ_DIV8 * 2) * -phase / 360.0, 0)) - 2
       # FIFO data description
       # [31:24] PhaseOfs : set 148 for 0°, 135 for +15.6° and 11 for -15.6°
       # [23]    PhasePol : 0: >=0, 1: < 0
@@ -318,18 +331,18 @@ class Dcf77:
     # Create TimecodeSet
     self.TimecodeSet.create()
     # Preset data for FIFO
-    self.LOW_7750  = genFifoData(7750*75-1,    True,  False, 149-1)  # Low 7750 cyc (100 ms) w/o phase mod
-    self.LOW_15500 = genFifoData(15500*75-1,   True,  False, 149-1)  # Low 15500 cyc (200 ms) w/o phase mod
-    self.HIGH_7750 = genFifoData(7750*149*2-1, False, False, 149-1)  # High 7750 cyc (100 ms) w/o phase mod
-    self.HIGH_560  = genFifoData(560*149*2-1,  False, False, 149-1)  # High 560 cyc w/o phase mod
+    self.LOW_7750  = genFifoData(cycles=7750,  lowAmp=True)   # Low  7750 cyc (100 ms) w/o phase mod
+    self.LOW_15500 = genFifoData(cycles=15500, lowAmp=True)   # Low 15500 cyc (200 ms) w/o phase mod
+    self.HIGH_7750 = genFifoData(cycles=7750,  lowAmp=False)  # High 7750 cyc (100 ms) w/o phase mod
+    self.HIGH_560  = genFifoData(cycles=560,   lowAmp=False)  # High  560 cyc w/o phase mod
     # Preset series of phase modulation FIFO data by LFSR (120 cycle per chip * 512)
     HIGH_120_PM_CHIP = (
-      genFifoData(120*149*2-1,  False, False, 136-1),  # High 120 cyc w/ +15.6 deg
-      genFifoData(120*149*2-1,  False, True,  12-1),  # High 120 cyc w/ -15.6 deg
+      genFifoData(cycles=120, lowAmp=False, phase=+15.6),  # High 120 cyc w/ +15.6 deg
+      genFifoData(cycles=120, lowAmp=False, phase=-15.6),  # High 120 cyc w/ -15.6 deg
     )
     self.HIGH_61440_PM = (
-      array.array('I', (HIGH_120_PM_CHIP[chip] for chip in genLfsrChips())),
-      array.array('I', (HIGH_120_PM_CHIP[1 - chip] for chip in genLfsrChips())),
+      array.array('I', (HIGH_120_PM_CHIP[chip] for chip in genLfsrChips())),      # Non-inverted
+      array.array('I', (HIGH_120_PM_CHIP[1 - chip] for chip in genLfsrChips())),  # Inverted
     )
     self.fifoErrorCheck = False
   def run(self, secToRun: int = 0) -> None:
