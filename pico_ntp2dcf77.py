@@ -38,7 +38,7 @@ TZ_CET_OFS = 1
 # DCF77 carrier frequency 77500  Hz
 DCF77_CARRIER_FREQ = 77500
 
-# System Frequency to set multiplier of DCF77 frequency
+# System Frequency to set multiplier of DCF77 frequency * 8
 # it also should be 300's multiplier to realize 15.6° phase modulation
 SYSTEM_FREQ = DCF77_CARRIER_FREQ * 600 * 2
 
@@ -81,12 +81,13 @@ class LocalTime:
       month = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')[self.month-1]
       return f'{wday}, {month} {self.mday:02d}, {self.year:04d} {self.hour:02d}:{self.minute:02d}:{self.second:02d}'
   class TzCet:
-    TZ = 1
+    TZ = 1  # positive only
     @classmethod
     def isSummerTime(cls, secs: int) -> bool:
       tt = LocalTime.TimeTuple(utime.localtime(secs))
-      HHMarch   = utime.mktime((tt.year, 3 , (31 - (int(5 * tt.year/4 + 4)) % 7), 1, 0, 0, 0, 0, 0))  # Time of March change to CEST
-      HHOctober = utime.mktime((tt.year, 10, (31 - (int(5 * tt.year/4 + 1)) % 7), 1, 0, 0, 0, 0, 0))  # Time of October change to CET
+      # switch CET or CEST (https://github.com/lammersch/ntp-timer/)
+      HHMarch   = utime.mktime((tt.year, 3 , (31 - (int(5 * tt.year/4 + 4)) % 7), cls.TZ, 0, 0, 0, 0))  # Time of March change to CEST
+      HHOctober = utime.mktime((tt.year, 10, (31 - (int(5 * tt.year/4 + 1)) % 7), cls.TZ, 0, 0, 0, 0))  # Time of October change to CET
       if secs < HHMarch:
         return False
       elif secs < HHOctober:
@@ -317,9 +318,9 @@ class Dcf77:
       #                    Low Amplitude case  - Clocks/16 incl. adj. set 7750*75-1    for 7750 cycles
       return ((phaseOfs & 0xff) << 24) | ((int(negPhaseMod) & 0b1) << 23) | ((int(lowAmp) & 0b1) << 22) | (clocks & 0x3fffff)
     # Generate 512 chips for phase modulation by LFSR
-    def genLfsrChips() -> Iterator[int]:
+    def genLfsrChips(size) -> Iterator[int]:
       lfsr = 0
-      for i in range(512):
+      for i in range(size):
         chip = lfsr & 0b1
         yield chip
         lfsr >>= 1
@@ -341,8 +342,8 @@ class Dcf77:
       genFifoData(cycles=120, lowAmp=False, phase=-15.6),  # High 120 cyc w/ -15.6 deg
     )
     self.HIGH_61440_PM = (
-      array.array('I', (HIGH_120_PM_CHIP[chip] for chip in genLfsrChips())),      # Non-inverted
-      array.array('I', (HIGH_120_PM_CHIP[1 - chip] for chip in genLfsrChips())),  # Inverted
+      array.array('I', (HIGH_120_PM_CHIP[chip] for chip in genLfsrChips(512))),      # Non-inverted
+      array.array('I', (HIGH_120_PM_CHIP[1 - chip] for chip in genLfsrChips(512))),  # Inverted
     )
     self.fifoErrorCheck = False
   def run(self, secToRun: int = 0) -> None:
@@ -365,7 +366,7 @@ class Dcf77:
         value = vector[i]
         # no need to align second's edge here
         # because PIO should consume exact one minute of cycles
-        # however please note that it runs with 'not so accurate' PLL clocks as a clock
+        # however please note that it runs with 'not so accurate' PLL frequency as a clock
         self.pinLed.toggle()
         if value == 0:
           putSmFifo(self.LOW_7750)
@@ -386,12 +387,12 @@ class Dcf77:
     sm = rp2.StateMachine(0, self.pioAsm, freq=SYSTEM_FREQ, sideset_base=self.pinModOutBase,)
     sm.active(False)
     sm.put(SYSTEM_FREQ // DCF77_CARRIER_FREQ // 8 - 2)  # write 148 integer to FIFO
-    sm.exec('out(isr, 32)')  # out to ISR    (thus, store 148 to ISR)
+    sm.exec('out(isr, 32)')                             # out to ISR (thus, store 148 to ISR)
     sm.active(True)
     # start modulation
     print(f'start DCF77 emission at {DCF77_CARRIER_FREQ} Hz')
     LocalTime.alignSecondEdge()
-    self.TimecodeSet.getCurrent().genTimecode(utime.time() + 61)  # to send time for next "minute"
+    self.TimecodeSet.getCurrent().genTimecode(utime.time() + 61)  # to generate time for next "minute"
 
     while True:
       def backgroundJob(lock: _thread.lock) -> None:  # Core1
@@ -405,7 +406,7 @@ class Dcf77:
           # generate next Timecode
           secs = current.secs
           next = self.TimecodeSet.getNext()
-          next.genTimecode(current.secs + 60 - current.t.second)  # to send time for next "minute" + adjust offset (should be only for the first time)
+          next.genTimecode(current.secs + 60 - current.t.second)  # to generate time for next "minute" + adjust offset (should be only for the first time)
       # generate next Timecode in the backgournd (this should finish in short time, therefore omitting 'join' thread)
       _thread.start_new_thread(backgroundJob, (lock,))
       # send current Timecode (this is supposed to take just 60 seconds because putting FIFO is blocking)
@@ -421,7 +422,7 @@ class Dcf77:
 
 def main() -> bool:
   print(f'System Frequency: {SYSTEM_FREQ} Hz')
-  machine.freq(SYSTEM_FREQ)  # recommend multiplier of 77500*2 to avoid jitter
+  machine.freq(SYSTEM_FREQ)
   pinLed = machine.Pin("LED", machine.Pin.OUT)
   pinModOutP = machine.Pin(PIN_MOD_BASE, machine.Pin.OUT)
   pinModOutN = machine.Pin(PIN_MOD_BASE + 1, machine.Pin.OUT)
