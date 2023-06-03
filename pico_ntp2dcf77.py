@@ -75,14 +75,14 @@ class LocalTime:
   class TimeTuple:
     def __init__(self, timeTuple: tuple):
       self.year, self.month, self.mday, self.hour, self.minute, self.second, self.weekday, self.yearday = timeTuple
-    def __str__(self):
+    def __str__(self) -> str:
       wday = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')[self.weekday]
       month = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')[self.month-1]
       return f'{wday}, {month} {self.mday:02d}, {self.year:04d} {self.hour:02d}:{self.minute:02d}:{self.second:02d}'
   class TzCet:
     TZ = 1
     @classmethod
-    def isSummerTime(cls, secs: int):
+    def isSummerTime(cls, secs: int) -> bool:
       tt = LocalTime.TimeTuple(utime.localtime(secs))
       HHMarch   = utime.mktime((tt.year, 3 , (31 - (int(5 * tt.year/4 + 4)) % 7), 1, 0, 0, 0, 0, 0))  # Time of March change to CEST
       HHOctober = utime.mktime((tt.year, 10, (31 - (int(5 * tt.year/4 + 1)) % 7), 1, 0, 0, 0, 0, 0))  # Time of October change to CET
@@ -93,7 +93,7 @@ class LocalTime:
       else:
         return False
     @classmethod
-    def localtime(cls, *args: list):
+    def localtime(cls, *args: list) -> LocalTime.TimeTuple:
       secs = utime.time() if len(args) < 1 else args[0]
       if cls.isSummerTime(secs):
         return LocalTime.localtime(secs + (cls.TZ + 1) * 3600)
@@ -101,7 +101,7 @@ class LocalTime:
         return LocalTime.localtime(secs + cls.TZ * 3600)
 
   @classmethod
-  def syncNtp(cls):
+  def syncNtp(cls) -> None:
     ntpTime = cls.__setNtpTime()
     print(f'NTP: {ntpTime}')
     rtcTime = cls.__setRtc(ntpTime)
@@ -133,11 +133,11 @@ class LocalTime:
 
 # PIO program
 @rp2.asm_pio(
-  sideset_init = (rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW),
-  out_shiftdir = rp2.PIO.SHIFT_RIGHT,
-  autopull = True,
-  pull_thresh = 32,
-  fifo_join = rp2.PIO.JOIN_TX,
+  sideset_init=(rp2.PIO.OUT_LOW, rp2.PIO.OUT_LOW),
+  out_shiftdir=rp2.PIO.SHIFT_RIGHT,
+  autopull=True,
+  pull_thresh=32,
+  fifo_join=rp2.PIO.JOIN_TX,
 )
 def pioAsmDcf77Carrier():
   # generate 1/1200 frequency pulse against PIO clock with amplitude control by PWM
@@ -218,44 +218,25 @@ def pioAsmDcf77Carrier():
 
 # DCF77 class
 class Dcf77:
-  def __init__(self, pinLed: machine.Pin, pinModOutBase: machine.Pin, pioAsm: Callable):
-    def genFifoData(clocks: int, lowAmp: bool, negPhaseMod: bool, phaseOfs: int) -> int:
-      # FIFO data description
-      # [31:24] PhaseOfs : set 148 for 0°, 135 for +15.6° and 11 for -15.6°
-      # [23]    PhasePol : 0: >=0, 1: < 0
-      # [22]    LowAmp   : 0: High Amplitude, 1: Low Amplitude
-      # [21:0]  Clocks   : High Amplitude case - Clocks/4 incl. adj.  set 7750*149*2-1 for 7750 cycles
-      #                    Low Amplitude case  - Clocks/16 incl. adj. set 7750*75-1    for 7750 cycles
-      return ((phaseOfs & 0xff) << 24) | ((int(negPhaseMod) & 0b1) << 23) | ((int(lowAmp) & 0b1) << 22) | (clocks & 0x3fffff)
-    # Generate 512 chips for phase modulation by LFSR
-    def genLfsrChips() -> Iterator[int]:
-      lfsr = 0
-      for i in range(512):
-        chip = lfsr & 0b1
-        yield chip
-        lfsr >>= 1
-        if chip == 0b1 or lfsr == 0:
-          lfsr ^= 0x110
-    self.pinLed = pinLed
-    self.pinModOutBase = pinModOutBase
-    self.pioAsm = pioAsm
-    # Preset data for FIFO
-    self.LOW_7750  = genFifoData(7750*75-1,    True,  False, 149-1)  # Low 7750 cyc (100 ms) w/o phase mod
-    self.LOW_15500 = genFifoData(15500*75-1,   True,  False, 149-1)  # Low 15500 cyc (200 ms) w/o phase mod
-    self.HIGH_7750 = genFifoData(7750*149*2-1, False, False, 149-1)  # High 7750 cyc (100 ms) w/o phase mod
-    self.HIGH_560  = genFifoData(560*149*2-1,  False, False, 149-1)  # High 560 cyc w/o phase mod
-    # Preset series of phase modulation FIFO data by LFSR (120 cycle per chip * 512)
-    HIGH_120_PM_CHIP = (
-      genFifoData(120*149*2-1,  False, False, 136-1),  # High 120 cyc w/ +15.6 deg
-      genFifoData(120*149*2-1,  False, True,  12-1),  # High 120 cyc w/ -15.6 deg
-    )
-    self.HIGH_61440_PM = (
-      array.array('I', (HIGH_120_PM_CHIP[chip] for chip in genLfsrChips())),
-      array.array('I', (HIGH_120_PM_CHIP[1 - chip] for chip in genLfsrChips())),
-    )
-  def run(self, secToRun: int = 0) -> None:
-    # === internal functions of run() (start) ===
-    def genTimecode(t: LocalTime.TimeTuple, **kwargs: dict) -> list[int]:
+  class TimecodeSet:
+    id = 0
+    @classmethod
+    def create(cls) -> None:
+      cls.timecodeSets = [Dcf77.TimecodeSet()] * 2
+    @classmethod
+    def getCurrent(cls) -> TimecodeSet:
+      return cls.timecodeSets[cls.id]
+    @classmethod
+    def getNext(cls) -> TimecodeSet:
+      return cls.timecodeSets[1 - cls.id]
+    @classmethod
+    def swap(cls) -> None:
+      cls.id = 1 - cls.id
+    def __init__(self):
+      self.secs = None
+      self.t = None
+      self.vector = None
+    def genTimecode(self, secs: int) -> None:
       ## Timecode generating functions ##
       def sync(**kwargs: dict) -> list:
         return [2]
@@ -270,7 +251,6 @@ class Dcf77:
         return [value & 0b1] * count
       def parity(vector: list[int], **kwargs: dict) -> list[int]:
         return bin(sum(vector), **kwargs)
-
       ## Timecode ##
       # 00: M: Start of minute (0)
       # 01 ~ 14: Civil warning bits: (send 0s in this program)
@@ -295,27 +275,69 @@ class Dcf77:
       # 10, 20, 40, 80: 10's digit
       # 1, 2, 4, 8    : 1's digit
 
-      a1 = int(kwargs.get('a1', False))
-      z1 = int(kwargs.get('z1', False))
+      self.secs = secs
+      self.t = LocalTime.localtime(self.secs)
+      a1 = 0
+      z1 = LocalTime.TzCet.isSummerTime(self.secs)
       z2 = 1 - z1
-      a2 = int(kwargs.get('a2', False))
-      vector = []
-      vector += bin(0, name='M') + bin(0, 14, name="CWB")  # 0 ~ 14
-      vector += bin(0, name='R') + bin(a1) + bin(z1) + bin(z2) + bin(a2) + bin(1, name='S')  # 15 ~ 20
-      vector += bcd(t.minute, 7)  # 21 ~ 27
-      vector += parity(vector[21:], name='P1')  # 28
-      vector += bcd(t.hour, 6)  # 29 ~ 34
-      vector += parity(vector[29:], name='P2')  # 35
-      vector += bcd(t.mday, 6)  # 36 ~ 41
-      vector += bcd(t.weekday + 1, 3)  # 42 ~ 44
-      vector += bcd(t.month, 5)  # 45 ~ 49
-      vector += bcd(t.year, 8)  # 50 ~ 57
-      vector += parity(vector[36:], name='P3')  # 58
-      vector += sync(name='MM')  # 59
-      return vector
+      a2 = 0
+      self.vector = []
+      self.vector += bin(0, name='M') + bin(0, 14, name="CWB")  # 0 ~ 14
+      self.vector += bin(0, name='R') + bin(a1) + bin(z1) + bin(z2) + bin(a2) + bin(1, name='S')  # 15 ~ 20
+      self.vector += bcd(self.t.minute, 7)  # 21 ~ 27
+      self.vector += parity(self.vector[21:], name='P1')  # 28
+      self.vector += bcd(self.t.hour, 6)  # 29 ~ 34
+      self.vector += parity(self.vector[29:], name='P2')  # 35
+      self.vector += bcd(self.t.mday, 6)  # 36 ~ 41
+      self.vector += bcd(self.t.weekday + 1, 3)  # 42 ~ 44
+      self.vector += bcd(self.t.month, 5)  # 45 ~ 49
+      self.vector += bcd(self.t.year, 8)  # 50 ~ 57
+      self.vector += parity(self.vector[36:], name='P3')  # 58
+      self.vector += sync(name='MM')  # 59
+  def __init__(self, pinLed: machine.Pin, pinModOutBase: machine.Pin, pioAsm: Callable):
+    def genFifoData(clocks: int, lowAmp: bool, negPhaseMod: bool, phaseOfs: int) -> int:
+      # FIFO data description
+      # [31:24] PhaseOfs : set 148 for 0°, 135 for +15.6° and 11 for -15.6°
+      # [23]    PhasePol : 0: >=0, 1: < 0
+      # [22]    LowAmp   : 0: High Amplitude, 1: Low Amplitude
+      # [21:0]  Clocks   : High Amplitude case - Clocks/4 incl. adj.  set 7750*149*2-1 for 7750 cycles
+      #                    Low Amplitude case  - Clocks/16 incl. adj. set 7750*75-1    for 7750 cycles
+      return ((phaseOfs & 0xff) << 24) | ((int(negPhaseMod) & 0b1) << 23) | ((int(lowAmp) & 0b1) << 22) | (clocks & 0x3fffff)
+    # Generate 512 chips for phase modulation by LFSR
+    def genLfsrChips() -> Iterator[int]:
+      lfsr = 0
+      for i in range(512):
+        chip = lfsr & 0b1
+        yield chip
+        lfsr >>= 1
+        if chip == 0b1 or lfsr == 0:
+          lfsr ^= 0x110
+    self.pinLed = pinLed
+    self.pinModOutBase = pinModOutBase
+    self.pioAsm = pioAsm
+    # Create TimecodeSet
+    self.TimecodeSet.create()
+    # Preset data for FIFO
+    self.LOW_7750  = genFifoData(7750*75-1,    True,  False, 149-1)  # Low 7750 cyc (100 ms) w/o phase mod
+    self.LOW_15500 = genFifoData(15500*75-1,   True,  False, 149-1)  # Low 15500 cyc (200 ms) w/o phase mod
+    self.HIGH_7750 = genFifoData(7750*149*2-1, False, False, 149-1)  # High 7750 cyc (100 ms) w/o phase mod
+    self.HIGH_560  = genFifoData(560*149*2-1,  False, False, 149-1)  # High 560 cyc w/o phase mod
+    # Preset series of phase modulation FIFO data by LFSR (120 cycle per chip * 512)
+    HIGH_120_PM_CHIP = (
+      genFifoData(120*149*2-1,  False, False, 136-1),  # High 120 cyc w/ +15.6 deg
+      genFifoData(120*149*2-1,  False, True,  12-1),  # High 120 cyc w/ -15.6 deg
+    )
+    self.HIGH_61440_PM = (
+      array.array('I', (HIGH_120_PM_CHIP[chip] for chip in genLfsrChips())),
+      array.array('I', (HIGH_120_PM_CHIP[1 - chip] for chip in genLfsrChips())),
+    )
+    self.fifoErrorCheck = False
+  def run(self, secToRun: int = 0) -> None:
+    # === internal functions of run() (start) ===
     def sendTimecode(sm: rp2.StateMachine, vector: list[int], second: int = 0) -> None:
       def putSmFifo(arg: int | array.array) -> None:
-        if sm.tx_fifo() == 0:
+        if self.fifoErrorCheck and sm.tx_fifo() == 0:
+          # if ERROR, modulation output includes some blank terms where signal is not generated
           print("ERROR: PIO StateMachine TX_FIFO empty")
         sm.put(arg)
       def getPmValue(index: int, value: int) -> int:
@@ -342,12 +364,13 @@ class Dcf77:
           putSmFifo(self.HIGH_7750)
         putSmFifo(self.HIGH_61440_PM[getPmValue(i, value)])  # array.array
         putSmFifo(self.HIGH_560)
+        # enable fifo error check from next round
+        self.fifoErrorCheck = True
     # === internal functions of run() (end) ===
-
-    # run()
+    lock = _thread.allocate_lock()
     ticksTimeout = utime.ticks_add(utime.ticks_ms(), secToRun * 1000)
     # start PIO
-    sm = rp2.StateMachine(0, self.pioAsm, freq = SYSTEM_FREQ, sideset_base = self.pinModOutBase,)
+    sm = rp2.StateMachine(0, self.pioAsm, freq=SYSTEM_FREQ, sideset_base=self.pinModOutBase,)
     sm.active(False)
     sm.put(SYSTEM_FREQ // DCF77_CARRIER_FREQ // 8 - 2)  # write 148 integer to FIFO
     sm.exec('out(isr, 32)')  # out to ISR    (thus, store 148 to ISR)
@@ -355,20 +378,33 @@ class Dcf77:
     # start modulation
     print(f'start DCF77 emission at {DCF77_CARRIER_FREQ} Hz')
     LocalTime.alignSecondEdge()
+    self.TimecodeSet.getCurrent().genTimecode(utime.time() + 61)  # to send time for next "minute"
 
     while True:
-      def printTimecode(t: LocalTime.TimeTuple, vector: list[int]):
-        print(f'Timecode: {t}')
-        # Timecode format of https://www.dcf77logs.de/live
-        #print('-'.join(list(map(lambda v: ''.join(list(map(str, v))), [[0], vector[0:15], vector[15:21], vector[21:29], vector[29:36], vector[36:42], vector[42:45], vector[45:50], vector[50:59]]))))
-      secs = utime.time() + 61  # to send time for next "minute"
-      t = LocalTime.localtime(secs)
-      vector = genTimecode(t, z1 = LocalTime.TzCet.isSummerTime(secs))
-      _thread.start_new_thread(printTimecode, (t, vector,))
-      sendTimecode(sm, vector, t.second)  # apply offset (should be only for the first time)
-      #if secToRun > 0 and utime.ticks_diff(utime.ticks_ms(), ticksTimeout) > 0:
-      #  print(f'Finished {secToRun}+ sec.')
-      #  break
+      def backgroundJob(lock: _thread.lock) -> None:  # Core1
+        with lock:
+          # print current Timecode
+          current = self.TimecodeSet.getCurrent()
+          print(f'Timecode: {current.t}  ', end='')
+          # Timecode format of https://www.dcf77logs.de/live
+          vector = current.vector
+          print('-'.join(list(map(lambda v: ''.join(list(map(str, v))), [[0], vector[0:15], vector[15:21], vector[21:29], vector[29:36], vector[36:42], vector[42:45], vector[45:50], vector[50:59]]))))
+          # generate next Timecode
+          secs = current.secs
+          next = self.TimecodeSet.getNext()
+          next.genTimecode(current.secs + 60 - current.t.second)  # to send time for next "minute" + adjust offset (should be only for the first time)
+      # generate next Timecode in the backgournd (this should finish in short time, therefore omitting 'join' thread)
+      _thread.start_new_thread(backgroundJob, (lock,))
+      # send current Timecode (this is supposed to take just 60 seconds because putting FIFO is blocking)
+      sendTimecode(sm, self.TimecodeSet.getCurrent().vector, self.TimecodeSet.getCurrent().t.second)
+      if lock.locked():
+          print("ERROR: backgroundJob has not finished yet")
+      # swap buffers
+      self.TimecodeSet.swap()
+      # check secToRun
+      if secToRun > 0 and utime.ticks_diff(utime.ticks_ms(), ticksTimeout) > 0:
+        print(f'Finished {secToRun}+ sec.')
+        break
 
 def main() -> bool:
   print(f'System Frequency: {SYSTEM_FREQ} Hz')
@@ -390,9 +426,9 @@ def main() -> bool:
   disconnectWifi()
   # DCF77
   dcf77 = Dcf77(
-    pinLed = pinLed,
-    pinModOutBase = pinModOutP,
-    pioAsm = pioAsmDcf77Carrier,
+    pinLed=pinLed,
+    pinModOutBase=pinModOutP,
+    pioAsm=pioAsmDcf77Carrier,
   )
   dcf77.run(SEC_TO_RUN)
   print('System reset to sync NTP again')
