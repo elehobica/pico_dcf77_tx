@@ -392,7 +392,7 @@ class Dcf77:
     # start modulation
     print(f'start DCF77 emission at {DCF77_CARRIER_FREQ} Hz')
     LocalTime.alignSecondEdge()
-    self.TimecodeSet.getCurrent().genTimecode(utime.time() + 61)  # to generate time for next "minute"
+    self.TimecodeSet.getCurrent().genTimecode(utime.time() + 59)  # to generate time for next "minute"
 
     while True:
       def backgroundJob(lock: _thread.lock) -> None:  # Core1
