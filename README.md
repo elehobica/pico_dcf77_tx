@@ -7,7 +7,7 @@ This project supports:
 * fetch CET (CEST) time by NTP
 * DCF77 carrier frequency at 77500 Hz
 * DCF77 amplitude modulation (High: 100%, Low: 12.5%)
-* DCF77 phase modulation (0°, +15.6°, -15.6°)
+* DCF77 phase modulation (0°, +15.6°, -15.6°) (Implemented, not verified yet)
 * minimum peripheral circuits with wired headphones to emit weak radio waves
 
 ## Supported Board
