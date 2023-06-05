@@ -1,7 +1,7 @@
-# NTP to DCF77 for Raspberry Pi Pico W
+# DCF77 transmitter for Raspberry Pi Pico W
 
 ## Overview
-This project is for DCF77 signal emulator for Raspberry Pi Pico W
+This project is DCF77 transmitter for Raspberry Pi Pico W in proximate usage
 
 This project supports:
 * fetch CET (CEST) time by NTP
@@ -21,7 +21,7 @@ This project supports:
 |  5 | GP3 | PIN_MOD_N | DCF77 signal differential output Nch |
 
 ## Connection Diagram
-![Connection Diagram](doc/pico_ntp2dcf77_connection.png)
+![Connection Diagram](doc/pico_dcf77_tx_connection.png)
 
 ## How to make the program work
 * Use [Thonny](https://thonny.org/) (Confirmed with Thonny 4.0.2, Python 3.10.9)
@@ -30,19 +30,19 @@ This project supports:
 ```
 # secrets.py
 secrets = {
-  "ssid": 'xxxx',
-  "password": 'xxxx',
+  'ssid': 'xxxx',
+  'password': 'xxxx',
 }
 ```
-* Excecute `pico_ntp2dcf77.py` from Thonny
-* For stand-alone application, please rename `pico_ntp2dcf77.py` as `main.py` and store in the storage of Raspberry Pi Pico W
+* Excecute `pico_dcf77_tx.py` from Thonny
+* For stand-alone application, please rename `pico_dcf77_tx.py` as `main.py` and store in the storage of Raspberry Pi Pico W
 
 ## Log
-Log format displayed in the console is made compliant to https://www.dcf77logs.de/live except for Civil warning bits / weather information
+Bit description log displayed in the console is made compliant to https://www.dcf77logs.de/live except for Civil warning bits / weather information
 ```
 Timecode: Sat, Jun 03, 2023 21:17:00  0-000000000000000-001001-11101000-1000010-110000-011-01100-110001001
 ```
 
 ## Tips for emitting DCF77
-* The recommended way to make the clock detect DCF77 emulated singal in small room environment, is just to connect wired earphone between PIN_MOD_P and PIN_MOD_N pins through designated circuit (LPF) and put the clock near the earphone cable. (This could damage the earphone. please try with cheaper one.)
-![Scene](doc/pico_ntp2dcf77_scene01.jpg)
+* The recommended way to make the clock detect DCF77 emulated singal in limited proximate environment, is just to connect wired earphone between PIN_MOD_P and PIN_MOD_N pins through designated circuit (LPF) and put the clock close to the earphone cable. (This could damage the earphone. please try with cheaper one.)
+![Scene](doc/pico_dcf77_tx_scene01.jpg)

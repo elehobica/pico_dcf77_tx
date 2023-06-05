@@ -1,5 +1,4 @@
-# NTP to DCF77
-#  for Raspberry Pi Pico W
+# DCF77 transmitter for Raspberry Pi Pico W
 # ------------------------------------------------------
 # Copyright (c) 2023, Elehobica
 #
@@ -84,10 +83,10 @@ class LocalTime:
     TZ = 1  # positive only
     @classmethod
     def isSummerTime(cls, secs: int) -> bool:
-      tt = LocalTime.TimeTuple(utime.localtime(secs))
+      t = LocalTime.TimeTuple(utime.localtime(secs))
       # switch CET or CEST (https://github.com/lammersch/ntp-timer/)
-      HHMarch   = utime.mktime((tt.year, 3 , (31 - (int(5 * tt.year/4 + 4)) % 7), cls.TZ, 0, 0, 0, 0))  # Time of March change to CEST
-      HHOctober = utime.mktime((tt.year, 10, (31 - (int(5 * tt.year/4 + 1)) % 7), cls.TZ, 0, 0, 0, 0))  # Time of October change to CET
+      HHMarch   = utime.mktime((t.year, 3 , (31 - (int(5 * t.year/4 + 4)) % 7), cls.TZ, 0, 0, 0, 0))  # Time of March change to CEST
+      HHOctober = utime.mktime((t.year, 10, (31 - (int(5 * t.year/4 + 1)) % 7), cls.TZ, 0, 0, 0, 0))  # Time of October change to CET
       if secs < HHMarch:
         return False
       elif secs < HHOctober:
@@ -158,22 +157,22 @@ def pioAsmDcf77Carrier():
 
   # ---------------------- no side-set option to keep previous pin status (start)
   label('ClocksEnd')
-  out(y, 22)                                     # get next Clocks4/8
+  out(y, 22)                                     # get next Clocks4/16
   out(x, 1)                                      # get LowAmp (0: High Amp, 1: Low Amp)
   jmp(x_dec, 'LowAmpH1Setup')
   out(x, 1)                                      # get PhasePol (0: >= 0, 1: < 0)
   jmp(x_dec, 'HighAmpH2Setup')
   # HighAmpH1Setup
-  out(x, 8)                                      # get PhaseOfs (should be 0 deg or +15.6 deg)
+  out(x, 8)                                      # get PhaseOfs (should be corresponding value of 0 deg or +15.6 deg)
   jmp(y_dec, 'HighAmpH1_2')   .side(P)           # always jmp
 
   label('HighAmpH2Setup')
-  out(x, 8)                                      # get PhaseOfs (should be -15.6 deg)
+  out(x, 8)                                      # get PhaseOfs (should be corresponding value of -15.6 deg)
   jmp(y_dec, 'HighAmpH2_2')   .side(N)           # always jmp
 
   label('LowAmpH1Setup')
   out(x, 1)                                      # get PhasePol (don't use)
-  out(x, 8)                                      # get PhaseOfs (should be 0 deg)
+  out(x, 8)                                      # get PhaseOfs (should be corresponding value of 0 deg)
   jmp('LowAmpH1')
   # ---------------------- no side-set option to keep previous pin status (end)
 
@@ -224,7 +223,8 @@ class Dcf77:
     id = 0
     @classmethod
     def create(cls) -> None:
-      cls.timecodeSets = [Dcf77.TimecodeSet()] * 2
+      # explicitly generate 2 instances
+      cls.timecodeSets = [Dcf77.TimecodeSet(), Dcf77.TimecodeSet()]
     @classmethod
     def getCurrent(cls) -> TimecodeSet:
       return cls.timecodeSets[cls.id]
@@ -240,7 +240,7 @@ class Dcf77:
       self.vector = None
     def genTimecode(self, secs: int) -> None:
       ## Timecode generating functions ##
-      def sync(**kwargs: dict) -> list:
+      def sync(**kwargs: dict) -> list[int]:
         return [2]
       def bcd(value: int, numDigits: int = 4, **kwargs: dict) -> Iterator[int]:
         for bitPos in range(0, numDigits):
@@ -400,8 +400,8 @@ class Dcf77:
           # print current Timecode
           current = self.TimecodeSet.getCurrent()
           print(f'Timecode: {current.t}  ', end='')
-          # Timecode format of https://www.dcf77logs.de/live
           vector = current.vector
+          # Timecode format of https://www.dcf77logs.de/live
           print('-'.join(list(map(lambda v: ''.join(list(map(str, v))), [[0], vector[0:15], vector[15:21], vector[21:29], vector[29:36], vector[36:42], vector[42:45], vector[45:50], vector[50:59]]))))
           # generate next Timecode
           secs = current.secs
@@ -412,7 +412,7 @@ class Dcf77:
       # send current Timecode (this is supposed to take just 60 seconds because putting FIFO is blocking)
       sendTimecode(sm, self.TimecodeSet.getCurrent().vector, self.TimecodeSet.getCurrent().t.second)
       if lock.locked():
-          print("ERROR: backgroundJob has not finished yet")
+        print("ERROR: backgroundJob has not finished yet")
       # swap buffers
       self.TimecodeSet.swap()
       # check secToRun
