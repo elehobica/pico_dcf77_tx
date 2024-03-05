@@ -20,6 +20,8 @@ This project supports:
 |  4 | GP2 | PIN_MOD_P | DCF77 signal differential output Pch |
 |  5 | GP3 | PIN_MOD_N | DCF77 signal differential output Nch |
 
+* Single-ended signal is not available since pair signals are asymmetrically driven in actual to have effect of PWM. Use a transformer to convert into single-ended output.
+
 ## Connection Diagram
 ![Connection Diagram](doc/pico_dcf77_tx_connection.png)
 
